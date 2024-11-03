@@ -1,0 +1,6 @@
+web3==6.15.1
+requests==2.31.0
+colorama==0.4.6
+python-dateutil==2.8.2
+pytz==2024.1
+eth-account==0.8.0
