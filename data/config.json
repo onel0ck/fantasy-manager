@@ -6,7 +6,11 @@
         "success_file": "logs/success_accounts.txt",
         "failure_file": "logs/failure_accounts.txt",
         "result_file": "logs/result.txt",
-        "log_file": "logs/app.log"
+        "log_file": "logs/app.log",
+        "old_account": false,
+        "min_balance": 0.01,
+        "max_balance_checks": 30,
+        "balance_check_delay": 3
     },
     "rpc": {
         "url": "https://rpc.blast.io"
@@ -14,6 +18,8 @@
     "tactic": {
         "enabled": false,
         "id": "your_id",
+        "max_toggle_attempts": 15,
+        "delay_between_attempts": 5,
         "decks": [
             [7, 6, 5, 3, 2],
             [7, 6, 5, 3, 2],
@@ -29,7 +35,10 @@
     },
     "quest": {
         "enabled": false,
-        "id": "your_id"
+        "ids": [
+            "ea7c4f8a-0db8-4a9d-a840-5f76cfb1fad5",
+            "ba57e629-9aee-4a2b-a02c-14713725f941"
+        ]
     },
     "daily": {
         "enabled": true
