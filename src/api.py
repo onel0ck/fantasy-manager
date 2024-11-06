@@ -207,7 +207,7 @@ class FantasyAPI:
             error_log(str(ex))
             return False
 
-    def quest_claim(self, token, wallet_address, account_number):
+    def quest_claim(self, token, wallet_address, account_number, quest_id):
         try:
             headers = {
                 'Accept': '*/*',
@@ -223,7 +223,7 @@ class FantasyAPI:
 
             payload = {
                 "playerId": wallet_address,
-                "questThresholdId": self.config['quest']['id']
+                "questThresholdId": quest_id
             }
 
             response = self.session.post(
@@ -234,12 +234,12 @@ class FantasyAPI:
             )
 
             if response.status_code == 201:
-                success_log(f'Successful quest claim for account {account_number}: {wallet_address}')
+                success_log(f'Successfully claimed quest {quest_id} for account {account_number}: {wallet_address}')
                 return True
             elif response.status_code == 429:
                 error_log(f'Too many requests. Waiting before retry for account {account_number}: {wallet_address}')
                 sleep(10)
-                return self.quest_claim(token, wallet_address, account_number)
+                return self.quest_claim(token, wallet_address, account_number, quest_id)
             else:
                 error_log(f'Quest claim failed for account {account_number}: {wallet_address}!')
                 error_log(response.text)
@@ -259,9 +259,10 @@ class FantasyAPI:
                 'Content-Type': 'application/json',
                 'Origin': self.base_url,
                 'Referer': f'{self.base_url}/play/tactics',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
             }
 
+            # Register tactic
             register_response = self.session.post(
                 f'{self.base_url}/api/tactics/register',
                 json={"tacticId": self.config['tactic']['id']},
@@ -283,20 +284,34 @@ class FantasyAPI:
 
             sleep(random.uniform(2, 5))
 
-            deck_response = self.session.get(
-                f'{self.api_url}/tactics/entry/{tactic_id}/choices',
-                headers=self.get_headers(token),
-                proxies=self.proxies
-            )
-
-            if deck_response.status_code != 200:
-                error_log(f'Error getting hero choices for account {account_number}. Status Code: {deck_response.status_code}')
-                error_log(deck_response.text)
-                return False
-
-            deck = deck_response.json()
-            if not isinstance(deck, dict) or 'hero_choices' not in deck:
-                error_log(f'Invalid deck format for account {account_number}')
+            # Get hero choices
+            max_attempts = 3
+            deck = None
+            
+            for attempt in range(max_attempts):
+                try:
+                    deck_response = self.session.get(
+                        f'{self.api_url}/tactics/entry/{tactic_id}/choices',
+                        headers=self.get_headers(token),
+                        proxies=self.proxies
+                    )
+                    
+                    if deck_response.status_code == 200:
+                        deck = deck_response.json()
+                        if isinstance(deck, dict) and 'hero_choices' in deck:
+                            break
+                        
+                    error_log(f'Invalid response format on attempt {attempt + 1}')
+                    if attempt < max_attempts - 1:
+                        sleep(2)
+                        
+                except Exception as e:
+                    error_log(f'Error on attempt {attempt + 1}: {str(e)}')
+                    if attempt < max_attempts - 1:
+                        sleep(2)
+            
+            if not deck:
+                error_log(f'Failed to get valid choices after {max_attempts} attempts')
                 return False
 
             cards = deck['hero_choices']
@@ -310,19 +325,19 @@ class FantasyAPI:
                 card = self._select_card_by_stars(stars, cards, used_cards)
                 if card:
                     hero_choices.append(card)
-                    total_stars += card['hero']['stars']
+                    total_stars += card['hero_score']['stars']
                 else:
                     max_allowed_stars = 24 - total_stars
                     card = self._get_alternative_card(cards, used_cards, max_allowed_stars)
                     if card:
                         hero_choices.append(card)
-                        total_stars += card['hero']['stars']
+                        total_stars += card['hero_score']['stars']
                     else:
-                        error_log(f'Error selecting card with {stars} stars for account {account_number}')
+                        error_log(f'Error selecting alternative card with {stars} stars for account {account_number}')
                         return False
 
             if len(hero_choices) != len(stars_to_select) or total_stars > 24:
-                error_log(f'Failed to select valid cards for account {account_number}. Total stars: {total_stars}')
+                error_log(f'Invalid card selection for account {account_number}. Total stars: {total_stars}')
                 return False
 
             hero_choices_json = json.dumps(hero_choices)
@@ -330,6 +345,8 @@ class FantasyAPI:
                 "tacticPlayerId": tactic_id,
                 "heroChoices": hero_choices_json
             }
+
+            sleep(random.uniform(1, 3))
 
             deck_upload_response = self.session.post(
                 f'{self.base_url}/api/tactics/deck/save',
@@ -438,3 +455,93 @@ Resources:
         accounts_per_deck = math.ceil(total_accounts / len(self.config['tactic']['decks']))
         deck_index = min((account_number - 1) // accounts_per_deck, len(self.config['tactic']['decks']) - 1)
         return self.config['tactic']['decks'][deck_index]
+
+    def toggle_free_tactics(self, token, wallet_address, account_number):
+        headers = {
+            'Accept': 'application/json, text/plain, */*',
+            'Authorization': f'Bearer {token}',
+            'Origin': self.base_url,
+            'Referer': f'{self.base_url}/',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'
+        }
+
+        max_attempts = self.config['tactic']['max_toggle_attempts']
+        delay = self.config['tactic']['delay_between_attempts']
+
+        for attempt in range(max_attempts):
+            try:
+                response = self.session.post(
+                    f'{self.api_url}/tactics/toggle-can-play-free-tactics',
+                    headers=headers,
+                    proxies=self.proxies
+                )
+                
+                if response.status_code == 201:
+                    data = response.json()
+                    if data.get('can_play_free_tactics', False):
+                        success_log(f'Tactics enabled for account {account_number}: {wallet_address}')
+                        return True
+                    else:
+                        info_log(f'Attempt {attempt + 1}: Tactics not yet enabled')
+                        sleep(delay)
+                else:
+                    error_log(f'Toggle request failed: {response.status_code}')
+                    sleep(delay)
+
+            except Exception as e:
+                error_log(f'Toggle attempt {attempt + 1} error: {str(e)}')
+                sleep(delay)
+
+        return False
+
+    def transfer_eth(self, from_private_key, from_address, to_address):
+        try:
+            balance_wei = self.web3.eth.get_balance(from_address)
+            balance_eth = float(self.web3.from_wei(balance_wei, 'ether'))
+            
+            initial_gas_reserve = 0.000001
+            max_retries = 3
+            
+            for attempt in range(max_retries):
+                try:
+                    gas_reserve = initial_gas_reserve * (2 ** attempt)
+                    transfer_amount = balance_eth - gas_reserve
+                    
+                    if transfer_amount <= 0:
+                        error_log(f'Insufficient balance for transfer from {from_address}')
+                        continue
+
+                    if transfer_amount < self.config['app']['min_balance']:
+                        error_log(f'Transfer amount too small: {transfer_amount} ETH')
+                        return False
+
+                    transaction = {
+                        'nonce': self.web3.eth.get_transaction_count(from_address),
+                        'to': self.web3.to_checksum_address(to_address),
+                        'value': self.web3.to_wei(transfer_amount, 'ether'),
+                        'gas': 21000,
+                        'maxFeePerGas': self.web3.eth.gas_price * 2,
+                        'maxPriorityFeePerGas': self.web3.to_wei(0.000000001, 'gwei'),
+                        'type': 2,
+                        'chainId': 81457
+                    }
+
+                    signed_txn = self.web3.eth.account.sign_transaction(transaction, from_private_key)
+                    tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+                    
+                    success_log(f'Sending {transfer_amount} ETH from {from_address} to {to_address}')
+                    success_log(f'TX Hash: {tx_hash.hex()}')
+                    
+                    receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
+                    if receipt['status'] == 1:
+                        return True
+                    
+                except Exception as e:
+                    error_log(f'Transfer attempt {attempt + 1} failed: {str(e)}')
+                    sleep(2)
+                    
+            return False
+
+        except Exception as e:
+            error_log(f'Critical error in transfer_eth: {str(e)}')
+            return False
