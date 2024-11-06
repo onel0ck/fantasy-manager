@@ -16,6 +16,52 @@ Advanced automation tool for Fantasy.top daily claims and interactions.
 - Colorized console output
 - Failed accounts auto-retry system
 
+## Important Setup Notes
+
+### Legacy Account Mode Setup
+When using `old_account: true` mode:
+- The first account in `keys_and_addresses.txt` must have sufficient ETH balance
+- Balance will be automatically transferred from first to subsequent accounts
+- Minimum recommended balance for first account: `0.01 ETH * (number_of_accounts)`
+- All accounts after the first one can have zero balance
+
+Example wallet sequence:
+```
+wallet1 (with balance) -> wallet2 -> wallet3 -> wallet4
+```
+
+The script will:
+1. Process the first wallet's tasks
+2. Transfer ETH to the second wallet
+3. Wait for balance confirmation
+4. Process second wallet's tasks
+5. Continue this chain for all accounts
+
+### Configuration Example for Legacy Mode
+```json
+{
+    "app": {
+        "threads": 1,  // Always use 1 thread for legacy mode
+        "old_account": true,
+        "min_balance": 0.01,
+        "max_balance_checks": 30,
+        "balance_check_delay": 3
+    },
+    "tactic": {
+        "enabled": true,
+        "id": "your_id",
+        "max_toggle_attempts": 15,
+        "delay_between_attempts": 5
+    }
+}
+```
+
+### Important Notes
+- Legacy mode automatically sets thread count to 1 for safe balance transfers
+- Each account must complete its tasks before ETH is transferred to the next account
+- If a transfer fails, the script will retry before moving to the next account
+- Monitor the first account's balance to ensure sufficient funds for all transfers
+
 ## Setup
 1. Clone the repository:
    ```bash
