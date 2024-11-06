@@ -41,7 +41,7 @@ The script will:
 ```json
 {
     "app": {
-        "threads": 1,  // Always use 1 thread for legacy mode
+        "threads": 1,
         "old_account": true,
         "min_balance": 0.01,
         "max_balance_checks": 30,
