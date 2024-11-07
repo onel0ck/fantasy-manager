@@ -291,7 +291,6 @@ class FantasyAPI:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
             }
 
-            # Register tactic
             register_response = self.session.post(
                 f'{self.base_url}/api/tactics/register',
                 json={"tacticId": self.config['tactic']['id']},
