@@ -93,7 +93,7 @@ class FantasyAPI:
                 return self.login(private_key, wallet_address, account_number)
 
             if auth_response.status_code == 429:
-                error_log(f'AUTH_INIT: Too many requests. Waiting before retry for account {account_number}: {wallet_address}')
+                info_log(f'AUTH_INIT: Too many requests. Waiting before retry for account {account_number}: {wallet_address}')
                 sleep(10)
                 return self.login(private_key, wallet_address, account_number)
 
@@ -150,62 +150,91 @@ class FantasyAPI:
             error_log(str(ex))
             return False
 
-    def daily_claim(self, token, wallet_address, account_number):
-        try:
-            headers = {
-                'Accept': 'application/json, text/plain, */*',
-                'Accept-Encoding': 'gzip, deflate, br, zstd',
-                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-                'Authorization': f'Bearer {token}',
-                'Content-Length': '0',
-                'Origin': self.base_url,
-                'Referer': f'{self.base_url}/',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'
-            }
+    def daily_claim(self, token, wallet_address, account_number, max_retries=5):
+        for attempt in range(max_retries):
+            try:
+                headers = {
+                    'Accept': 'application/json, text/plain, */*',
+                    'Accept-Encoding': 'gzip, deflate, br, zstd',
+                    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Authorization': f'Bearer {token}',
+                    'Content-Length': '0',
+                    'Origin': self.base_url,
+                    'Referer': f'{self.base_url}/',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'
+                }
 
-            response = self.session.post(
-                f'{self.api_url}/quest/daily-claim',
-                headers=headers,
-                data="",
-                proxies=self.proxies,
-                timeout=30
-            )
+                response = self.session.post(
+                    f'{self.api_url}/quest/daily-claim',
+                    headers=headers,
+                    data="",
+                    proxies=self.proxies,
+                    timeout=30
+                )
 
-            if response.status_code == 201:
-                data = response.json()
-                if data.get("success", False):
-                    daily_streak = data.get("dailyQuestStreak", "N/A")
-                    current_day = data.get("dailyQuestProgress", "N/A")
-                    prize = data.get("selectedPrize", {}).get("id", "No prize selected")
+                if response.status_code == 429:
+                    retry_data = response.json()
+                    retry_after = retry_data.get('retryAfter', 60)
+                    retry_at = retry_data.get('retryAt')
                     
-                    success_log(f'№{account_number}:{wallet_address}: '
-                              f'{Fore.GREEN}RECORD:{daily_streak}{Fore.LIGHTBLACK_EX}, '
-                              f'{Fore.GREEN}CURRENT:{current_day}{Fore.LIGHTBLACK_EX}, '
-                              f'{Fore.GREEN}PRIZE:{prize}{Fore.LIGHTBLACK_EX}')
-                    return True
-                else:
-                    next_due_time = data.get("nextDueTime")
-                    if next_due_time:
-                        next_due_datetime = parser.parse(next_due_time)
-                        moscow_tz = pytz.timezone('Europe/Moscow')
-                        current_time = datetime.now(moscow_tz)
-                        time_difference = next_due_datetime.replace(tzinfo=pytz.UTC) - current_time.replace(tzinfo=moscow_tz)
-                        hours, remainder = divmod(time_difference.seconds, 3600)
-                        minutes, _ = divmod(remainder, 60)
+                    info_log(f'Rate limit hit for account {account_number}. '
+                            f'Attempt {attempt + 1}/{max_retries}. '
+                            f'Waiting {retry_after} seconds. '
+                            f'Retry at: {retry_at}')
+                    
+                    sleep(retry_after)
+                    continue
+
+                if response.status_code == 201:
+                    data = response.json()
+                    if data.get("success", False):
+                        daily_streak = data.get("dailyQuestStreak", "N/A")
+                        current_day = data.get("dailyQuestProgress", "N/A")
+                        prize = data.get("selectedPrize", {}).get("id", "No prize selected")
                         
-                        success_log(f"{account_number}: {wallet_address}: "
-                                  f"Next claim: {hours}h {minutes}m")
+                        success_log(f'№{account_number}:{wallet_address}: '
+                                  f'{Fore.GREEN}RECORD:{daily_streak}{Fore.LIGHTBLACK_EX}, '
+                                  f'{Fore.GREEN}CURRENT:{current_day}{Fore.LIGHTBLACK_EX}, '
+                                  f'{Fore.GREEN}PRIZE:{prize}{Fore.LIGHTBLACK_EX}')
+                        return True
                     else:
-                        success_log(f"{account_number} claim next $$$$$$$$$: {wallet_address}: {response.text}")
-                    return True
-            else:
-                error_log(f'Error during daily claim for account {account_number}: {wallet_address} | Status Code: {response.status_code}')
-                error_log(response.text)
-                return False
-        except requests.exceptions.RequestException as ex:
-            error_log(f'Error during daily claim for account {account_number}: {wallet_address}')
-            error_log(str(ex))
-            return False
+                        next_due_time = data.get("nextDueTime")
+                        if next_due_time:
+                            next_due_datetime = parser.parse(next_due_time)
+                            moscow_tz = pytz.timezone('Europe/Moscow')
+                            current_time = datetime.now(moscow_tz)
+                            time_difference = next_due_datetime.replace(tzinfo=pytz.UTC) - current_time.replace(tzinfo=moscow_tz)
+                            hours, remainder = divmod(time_difference.seconds, 3600)
+                            minutes, _ = divmod(remainder, 60)
+                            
+                            success_log(f"{account_number}: {wallet_address}: "
+                                      f"Next claim: {hours}h {minutes}m")
+                        else:
+                            success_log(f"{account_number} claim next $$$$$$$$$: {wallet_address}: {response.text}")
+                        return True
+                else:
+                    if attempt == max_retries - 1:
+                        error_log(f'Error during daily claim for account {account_number}: {wallet_address} | Status Code: {response.status_code}')
+                        error_log(response.text)
+                        return False
+                    else:
+                        info_log(f'Retrying daily claim for account {account_number}. '
+                                f'Attempt {attempt + 1}/{max_retries}')
+                        sleep(5)
+                        continue
+
+            except requests.exceptions.RequestException as ex:
+                if attempt == max_retries - 1:
+                    error_log(f'Error during daily claim for account {account_number}: {wallet_address}')
+                    error_log(str(ex))
+                    return False
+                else:
+                    info_log(f'Connection error, retrying daily claim for account {account_number}. '
+                            f'Attempt {attempt + 1}/{max_retries}')
+                    sleep(5)
+                    continue
+
+        return False
 
     def quest_claim(self, token, wallet_address, account_number, quest_id):
         try:
