@@ -313,7 +313,6 @@ class FantasyAPI:
 
             sleep(random.uniform(2, 5))
 
-            # Get hero choices
             max_attempts = 3
             deck = None
             
