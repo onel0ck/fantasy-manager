@@ -47,7 +47,7 @@ class FantasyAPI:
             }
             
             init_response = self.session.post(
-                'https://auth.privy.io/api/v1/siwe/init', 
+                'https://privy.fantasy.top/api/v1/siwe/init', 
                 json=init_payload, 
                 headers=init_headers, 
                 proxies=self.proxies
