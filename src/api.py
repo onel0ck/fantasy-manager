@@ -13,11 +13,12 @@ from colorama import Fore
 from .utils import error_log, success_log, info_log
 
 class FantasyAPI:
-    def __init__(self, web3_provider, session, proxies, config):
+    def __init__(self, web3_provider, session, proxies, config, user_agent):
         self.web3 = Web3(Web3.HTTPProvider(web3_provider))
         self.session = session
         self.proxies = proxies
         self.config = config
+        self.user_agent = user_agent
         self.base_url = "https://fantasy.top"
         self.api_url = "https://api-v2.fantasy.top"
 
@@ -25,7 +26,7 @@ class FantasyAPI:
         headers = {
             'Accept': 'application/json',
             'Content-Type': 'application/json',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+            'User-Agent': self.user_agent,
             'Origin': self.base_url,
             'Referer': f'{self.base_url}/'
         }
@@ -43,7 +44,7 @@ class FantasyAPI:
                 'Privy-Client': 'react-auth:1.88.1',
                 'Origin': self.base_url,
                 'Referer': f'{self.base_url}/',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+                'User-Agent': self.user_agent,
             }
             
             init_response = self.session.post(
@@ -124,7 +125,7 @@ class FantasyAPI:
                 'Content-Type': 'application/json',
                 'Origin': self.base_url,
                 'Referer': f'{self.base_url}/onboarding/home',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'
+                'User-Agent': self.user_agent
             }
 
             payload = {"address": wallet_address}
@@ -161,7 +162,7 @@ class FantasyAPI:
                     'Content-Length': '0',
                     'Origin': self.base_url,
                     'Referer': f'{self.base_url}/',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'
+                    'User-Agent': self.user_agent
                 }
 
                 response = self.session.post(
@@ -247,7 +248,7 @@ class FantasyAPI:
                 'Content-Type': 'application/json',
                 'Origin': self.base_url,
                 'Referer': f'{self.base_url}/rewards',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+                'User-Agent': self.user_agent
             }
 
             payload = {
@@ -288,7 +289,7 @@ class FantasyAPI:
                 'Content-Type': 'application/json',
                 'Origin': self.base_url,
                 'Referer': f'{self.base_url}/play/tactics',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+                'User-Agent': self.user_agent
             }
 
             register_response = self.session.post(
@@ -375,10 +376,21 @@ class FantasyAPI:
 
             sleep(random.uniform(1, 3))
 
+            deck_upload_headers = {
+                'Accept': '*/*',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
+                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Authorization': f'Bearer {token}',
+                'Content-Type': 'application/json',
+                'Origin': self.base_url,
+                'Referer': f'{self.base_url}/play/tactics',
+                'User-Agent': self.user_agent
+            }
+
             deck_upload_response = self.session.post(
                 f'{self.base_url}/api/tactics/deck/save',
                 json=payload_card,
-                headers=headers,
+                headers=deck_upload_headers,
                 proxies=self.proxies
             )
 
@@ -396,10 +408,11 @@ class FantasyAPI:
 
     def info(self, token, wallet_address, account_number):
         try:
+            headers = self.get_headers(token)
             response = self.session.get(
                 f'{self.base_url}/api/get-player-basic-data',
                 params={"playerId": wallet_address},
-                headers=self.get_headers(token),
+                headers=headers,
                 proxies=self.proxies
             )
 
@@ -439,57 +452,13 @@ class FantasyAPI:
             error_log(str(ex))
             return False
 
-    def check_cookies(self):
-        required_cookies = ['privy-token', 'privy-session', 'privy-access-token']
-        return all(cookie in self.session.cookies for cookie in required_cookies)
-
-    def _create_sign_message(self, wallet_address, nonce):
-        return f"""fantasy.top wants you to sign in with your Ethereum account:
-{wallet_address}
-
-By signing, you are proving you own this wallet and logging in. This does not initiate a transaction or cost any fees.
-
-URI: https://fantasy.top
-Version: 1
-Chain ID: 81457
-Nonce: {nonce}
-Issued At: {datetime.utcnow().isoformat()}Z
-Resources:
-- https://privy.io"""
-
-    def _sign_message(self, message, private_key):
-        return self.web3.eth.account.sign_message(
-            encode_defunct(message.encode('utf-8')),
-            private_key
-        )
-
-    def _select_card_by_stars(self, stars, deck, used_cards):
-        for card in deck:
-            if isinstance(card, dict) and 'hero' in card and 'stars' in card['hero']:
-                if card['hero']['stars'] == stars and card not in used_cards:
-                    used_cards.append(card)
-                    return card
-        return None
-
-    def _get_alternative_card(self, deck, used_cards, max_stars):
-        for card in deck:
-            if card not in used_cards and card['hero']['stars'] <= max_stars:
-                used_cards.append(card)
-                return card
-        return None
-
-    def _get_deck_for_account(self, account_number, total_accounts):
-        accounts_per_deck = math.ceil(total_accounts / len(self.config['tactic']['decks']))
-        deck_index = min((account_number - 1) // accounts_per_deck, len(self.config['tactic']['decks']) - 1)
-        return self.config['tactic']['decks'][deck_index]
-
     def toggle_free_tactics(self, token, wallet_address, account_number):
         headers = {
             'Accept': 'application/json, text/plain, */*',
             'Authorization': f'Bearer {token}',
             'Origin': self.base_url,
             'Referer': f'{self.base_url}/',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36'
+            'User-Agent': self.user_agent
         }
 
         max_attempts = self.config['tactic']['max_toggle_attempts']
@@ -572,3 +541,47 @@ Resources:
         except Exception as e:
             error_log(f'Critical error in transfer_eth: {str(e)}')
             return False
+
+    def check_cookies(self):
+        required_cookies = ['privy-token', 'privy-session', 'privy-access-token']
+        return all(cookie in self.session.cookies for cookie in required_cookies)
+
+    def _create_sign_message(self, wallet_address, nonce):
+        return f"""fantasy.top wants you to sign in with your Ethereum account:
+{wallet_address}
+
+By signing, you are proving you own this wallet and logging in. This does not initiate a transaction or cost any fees.
+
+URI: https://fantasy.top
+Version: 1
+Chain ID: 81457
+Nonce: {nonce}
+Issued At: {datetime.utcnow().isoformat()}Z
+Resources:
+- https://privy.io"""
+
+    def _sign_message(self, message, private_key):
+        return self.web3.eth.account.sign_message(
+            encode_defunct(message.encode('utf-8')),
+            private_key
+        )
+
+    def _select_card_by_stars(self, stars, deck, used_cards):
+        for card in deck:
+            if isinstance(card, dict) and 'hero' in card and 'stars' in card['hero']:
+                if card['hero']['stars'] == stars and card not in used_cards:
+                    used_cards.append(card)
+                    return card
+        return None
+
+    def _get_alternative_card(self, deck, used_cards, max_stars):
+        for card in deck:
+            if card not in used_cards and card['hero']['stars'] <= max_stars:
+                used_cards.append(card)
+                return card
+        return None
+
+    def _get_deck_for_account(self, account_number, total_accounts):
+        accounts_per_deck = math.ceil(total_accounts / len(self.config['tactic']['decks']))
+        deck_index = min((account_number - 1) // accounts_per_deck, len(self.config['tactic']['decks']) - 1)
+        return self.config['tactic']['decks'][deck_index]
