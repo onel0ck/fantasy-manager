@@ -8,9 +8,10 @@ from .api import FantasyAPI
 from .utils import error_log, info_log, success_log
 
 class FantasyProcessor:
-    def __init__(self, config, proxies_cycle):
+    def __init__(self, config, proxies_cycle, user_agents_cycle):
         self.config = config
         self.proxies_cycle = proxies_cycle
+        self.user_agents_cycle = user_agents_cycle
         
     def process_account(self, account_number, private_key, wallet_address, total_accounts):
         session = requests.Session()
@@ -19,11 +20,14 @@ class FantasyProcessor:
             "https": next(self.proxies_cycle)
         }
         
+        user_agent = next(self.user_agents_cycle)
+        
         api = FantasyAPI(
             web3_provider=self.config['rpc']['url'],
             session=session,
             proxies=proxy,
-            config=self.config
+            config=self.config,
+            user_agent=user_agent
         )
         
         info_log(f'Processing account {account_number}: {wallet_address}')
@@ -72,7 +76,9 @@ class FantasyProcessor:
                     sleep(random.uniform(1, 3))
 
             if self.config['app']['old_account']:
-                accounts = self._read_accounts()
+                with open(self.config['app']['keys_file'], 'r') as f:
+                    accounts = [(i, line.strip().split(':')) for i, line in enumerate(f.readlines(), 1)]
+                
                 current_index = next((i for i, (num, (pk, addr)) in enumerate(accounts) if pk == private_key), None)
                 
                 if current_index is not None and current_index + 1 < len(accounts):
