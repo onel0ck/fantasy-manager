@@ -1,6 +1,6 @@
 {
     "app": {
-        "threads": 5,
+        "threads": 15,
         "keys_file": "data/keys_and_addresses.txt",
         "proxy_file": "data/proxys.txt",
         "success_file": "logs/success_accounts.txt",
@@ -13,7 +13,7 @@
         "balance_check_delay": 3
     },
     "rpc": {
-        "url": "https://rpc.blast.io"
+        "url": "https://blast-rpc.publicnode.com"
     },
     "tactic": {
         "enabled": false,
