@@ -207,7 +207,6 @@ class FantasyAPI:
                 if response.status_code == 201:
                     data = response.json()
                     if data.get("success", False):
-                        # Всё равно сохраняем время клейма, но не используем для проверки
                         account_data = self.account_storage.get_account_data(wallet_address)
                         self.account_storage.update_account(
                             wallet_address,
