@@ -8,12 +8,12 @@ from eth_account.messages import encode_defunct
 from datetime import datetime
 from dateutil import parser
 import pytz
-import math
 from colorama import Fore
 from .utils import error_log, success_log, info_log
+from .account_storage import AccountStorage
 
 class FantasyAPI:
-    def __init__(self, web3_provider, session, proxies, config, user_agent):
+    def __init__(self, web3_provider, session, proxies, config, user_agent, account_storage):
         self.web3 = Web3(Web3.HTTPProvider(web3_provider))
         self.session = session
         self.proxies = proxies
@@ -21,6 +21,7 @@ class FantasyAPI:
         self.user_agent = user_agent
         self.base_url = "https://fantasy.top"
         self.api_url = "https://api-v2.fantasy.top"
+        self.account_storage = account_storage
 
     def get_headers(self, token=None):
         headers = {
@@ -35,6 +36,15 @@ class FantasyAPI:
         return headers
 
     def login(self, private_key, wallet_address, account_number):
+        account_data = self.account_storage.get_account_data(wallet_address)
+        
+        if account_data and self.account_storage.is_token_valid(wallet_address):
+            token = account_data.get("token")
+            if token:
+                for cookie_name, cookie_value in account_data.get("cookies", {}).items():
+                    self.session.cookies.set(cookie_name, cookie_value)
+                return {"success": True}
+
         try:
             init_payload = {'address': wallet_address}
             init_headers = {
@@ -104,9 +114,12 @@ class FantasyAPI:
                 return False
 
             auth_data = auth_response.json()
-
-            for cookie in auth_response.cookies:
-                self.session.cookies.set_cookie(cookie)
+            cookies_dict = {cookie.name: cookie.value for cookie in self.session.cookies}
+            self.account_storage.update_account(
+                wallet_address,
+                private_key,
+                cookies=cookies_dict
+            )
 
             info_log(f'Authentication successful for account {account_number}: {wallet_address}')
             return auth_data
@@ -117,6 +130,10 @@ class FantasyAPI:
             return False
 
     def get_token(self, auth_data, wallet_address, account_number):
+        account_data = self.account_storage.get_account_data(wallet_address)
+        if account_data and self.account_storage.is_token_valid(wallet_address):
+            return account_data.get("token")
+
         try:
             headers = {
                 'Accept': 'application/json, text/plain, */*',
@@ -140,6 +157,12 @@ class FantasyAPI:
 
             if response.status_code == 200:
                 token = response.json().get('token')
+                if token:
+                    self.account_storage.update_account(
+                        wallet_address,
+                        account_data["private_key"],
+                        token=token
+                    )
                 info_log(f'Privy request successful for account {account_number}: {wallet_address}')
                 return token
             else:
@@ -152,6 +175,11 @@ class FantasyAPI:
             return False
 
     def daily_claim(self, token, wallet_address, account_number, max_retries=5):
+        next_claim_time = self.account_storage.get_next_daily_claim_time(wallet_address)
+        if next_claim_time and datetime.now(pytz.UTC) < next_claim_time:
+            success_log(f"Account {account_number}: {wallet_address}: Next claim available at {next_claim_time}")
+            return True
+
         for attempt in range(max_retries):
             try:
                 headers = {
@@ -177,26 +205,23 @@ class FantasyAPI:
                     retry_data = response.json()
                     retry_after = retry_data.get('retryAfter', 60)
                     retry_at = retry_data.get('retryAt')
-                    
-                    info_log(f'Rate limit hit for account {account_number}. '
-                            f'Attempt {attempt + 1}/{max_retries}. '
-                            f'Waiting {retry_after} seconds. '
-                            f'Retry at: {retry_at}')
-                    
+                    info_log(f'Rate limit hit for account {account_number}. Attempt {attempt + 1}/{max_retries}. Waiting {retry_after} seconds. Retry at: {retry_at}')
                     sleep(retry_after)
                     continue
 
                 if response.status_code == 201:
                     data = response.json()
                     if data.get("success", False):
+                        account_data = self.account_storage.get_account_data(wallet_address)
+                        self.account_storage.update_account(
+                            wallet_address,
+                            account_data["private_key"],
+                            last_daily_claim=datetime.now(pytz.UTC).isoformat()
+                        )
                         daily_streak = data.get("dailyQuestStreak", "N/A")
                         current_day = data.get("dailyQuestProgress", "N/A")
                         prize = data.get("selectedPrize", {}).get("id", "No prize selected")
-                        
-                        success_log(f'№{account_number}:{wallet_address}: '
-                                  f'{Fore.GREEN}RECORD:{daily_streak}{Fore.LIGHTBLACK_EX}, '
-                                  f'{Fore.GREEN}CURRENT:{current_day}{Fore.LIGHTBLACK_EX}, '
-                                  f'{Fore.GREEN}PRIZE:{prize}{Fore.LIGHTBLACK_EX}')
+                        success_log(f'№{account_number}:{wallet_address}: {Fore.GREEN}RECORD:{daily_streak}{Fore.LIGHTBLACK_EX}, {Fore.GREEN}CURRENT:{current_day}{Fore.LIGHTBLACK_EX}, {Fore.GREEN}PRIZE:{prize}{Fore.LIGHTBLACK_EX}')
                         return True
                     else:
                         next_due_time = data.get("nextDueTime")
@@ -207,9 +232,7 @@ class FantasyAPI:
                             time_difference = next_due_datetime.replace(tzinfo=pytz.UTC) - current_time.replace(tzinfo=moscow_tz)
                             hours, remainder = divmod(time_difference.seconds, 3600)
                             minutes, _ = divmod(remainder, 60)
-                            
-                            success_log(f"{account_number}: {wallet_address}: "
-                                      f"Next claim: {hours}h {minutes}m")
+                            success_log(f"{account_number}: {wallet_address}: Next claim: {hours}h {minutes}m")
                         else:
                             success_log(f"{account_number} claim next $$$$$$$$$: {wallet_address}: {response.text}")
                         return True
@@ -219,8 +242,7 @@ class FantasyAPI:
                         error_log(response.text)
                         return False
                     else:
-                        info_log(f'Retrying daily claim for account {account_number}. '
-                                f'Attempt {attempt + 1}/{max_retries}')
+                        info_log(f'Retrying daily claim for account {account_number}. Attempt {attempt + 1}/{max_retries}')
                         sleep(5)
                         continue
 
@@ -230,8 +252,7 @@ class FantasyAPI:
                     error_log(str(ex))
                     return False
                 else:
-                    info_log(f'Connection error, retrying daily claim for account {account_number}. '
-                            f'Attempt {attempt + 1}/{max_retries}')
+                    info_log(f'Connection error, retrying daily claim for account {account_number}. Attempt {attempt + 1}/{max_retries}')
                     sleep(5)
                     continue
 
