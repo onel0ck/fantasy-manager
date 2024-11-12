@@ -175,11 +175,6 @@ class FantasyAPI:
             return False
 
     def daily_claim(self, token, wallet_address, account_number, max_retries=5):
-        next_claim_time = self.account_storage.get_next_daily_claim_time(wallet_address)
-        if next_claim_time and datetime.now(pytz.UTC) < next_claim_time:
-            success_log(f"Account {account_number}: {wallet_address}: Next claim available at {next_claim_time}")
-            return True
-
         for attempt in range(max_retries):
             try:
                 headers = {
@@ -212,6 +207,7 @@ class FantasyAPI:
                 if response.status_code == 201:
                     data = response.json()
                     if data.get("success", False):
+                        # Всё равно сохраняем время клейма, но не используем для проверки
                         account_data = self.account_storage.get_account_data(wallet_address)
                         self.account_storage.update_account(
                             wallet_address,
