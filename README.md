@@ -15,8 +15,42 @@ Advanced automation tool for Fantasy.top daily claims and interactions.
 - Detailed success/failure logging
 - Colorized console output
 - Failed accounts auto-retry system
+- Account data persistence with automatic token and session management
 
 ## Important Setup Notes
+
+### Account Data Storage System
+The script now includes an advanced account data storage system that maintains:
+- Bearer tokens and their validity periods
+- Session cookies
+- Last daily claim timestamps
+- Account creation dates
+- Private keys and addresses
+
+Data is stored in `data/accounts_data.json` and is automatically managed to:
+- Minimize unnecessary authentication requests
+- Track daily claim cooldowns
+- Preserve session data between script restarts
+- Handle token expiration and renewal
+
+Example account data structure:
+```json
+{
+    "0xWALLET_ADDRESS": {
+        "private_key": "PRIVATE_KEY",
+        "created_at": "2024-11-12T10:00:00.000000Z",
+        "token": "BEARER_TOKEN",
+        "token_updated_at": "2024-11-12T10:00:00.000000Z",
+        "cookies": {
+            "privy-token": "COOKIE_VALUE",
+            "privy-session": "COOKIE_VALUE",
+            "privy-access-token": "COOKIE_VALUE"
+        },
+        "cookies_updated_at": "2024-11-12T10:00:00.000000Z",
+        "last_daily_claim": "2024-11-12T10:00:00.000000Z"
+    }
+}
+```
 
 ### Legacy Account Mode Setup
 When using `old_account: true` mode:
@@ -124,6 +158,12 @@ http://login:password@ip:port
 
 ## New Features Details
 
+### Account Data Management
+- Automatic token and session persistence
+- Smart authentication system that reuses valid sessions
+- Daily claim cooldown tracking
+- Efficient token refresh mechanism
+
 ### Legacy Account Support
 - Set `old_account: true` for legacy account processing
 - Automated ETH balance checks and transfers between accounts
@@ -137,11 +177,14 @@ http://login:password@ip:port
 - Configurable delays between quest claims
 
 ### Operation Order
-1. Tactic operations (if enabled)
-2. Daily claims (if enabled)
-3. Quest claims (processes all configured quest IDs)
-4. ETH transfers (for legacy accounts)
-5. Account info collection (if enabled)
+1. Check for valid stored session data
+2. Authenticate if needed
+3. Tactic operations (if enabled)
+4. Daily claims (if enabled)
+5. Quest claims (processes all configured quest IDs)
+6. ETH transfers (for legacy accounts)
+7. Account info collection (if enabled)
+8. Update stored account data
 
 ### Balance Management
 - Configurable minimum balance requirements
@@ -169,6 +212,7 @@ http://login:password@ip:port
 - **Proxy Support**: Rotates proxies for each account
 - **Error Handling**: Auto-retries failed accounts
 - **Logging System**: Detailed logs with timestamps and status
+- **Data Persistence**: Maintains account states between runs
 
 ## Logs
 The script creates several log files:
@@ -176,6 +220,7 @@ The script creates several log files:
 - `success_accounts.txt`: Successfully processed accounts
 - `failure_accounts.txt`: Failed accounts
 - `result.txt`: Detailed account information
+- `data/accounts_data.json`: Account session and claim data
 
 ## Controls
 - Use CTRL+C to gracefully stop the script
