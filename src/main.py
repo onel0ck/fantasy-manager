@@ -6,12 +6,14 @@ from web3 import Web3
 from colorama import Fore
 from .api import FantasyAPI
 from .utils import error_log, info_log, success_log
+from .account_storage import AccountStorage
 
 class FantasyProcessor:
     def __init__(self, config, proxies_cycle, user_agents_cycle):
         self.config = config
         self.proxies_cycle = proxies_cycle
         self.user_agents_cycle = user_agents_cycle
+        self.account_storage = AccountStorage()
         
     def process_account(self, account_number, private_key, wallet_address, total_accounts):
         session = requests.Session()
@@ -27,32 +29,36 @@ class FantasyProcessor:
             session=session,
             proxies=proxy,
             config=self.config,
-            user_agent=user_agent
+            user_agent=user_agent,
+            account_storage=self.account_storage
         )
         
         info_log(f'Processing account {account_number}: {wallet_address}')
         
         try:
-            if self.config['app']['old_account']:
-                balance = api.check_eth_balance(wallet_address)
-                if balance < self.config['app']['min_balance']:
-                    error_log(f'Insufficient balance ({balance} ETH) for account {account_number}')
+            account_data = self.account_storage.get_account_data(wallet_address)
+            need_login = True
+            
+            if account_data and self.account_storage.is_token_valid(wallet_address):
+                token = account_data.get("token")
+                cookies = account_data.get("cookies", {})
+                
+                if token and cookies:
+                    for cookie_name, cookie_value in cookies.items():
+                        session.cookies.set(cookie_name, cookie_value)
+                    need_login = False
+            
+            if need_login:
+                auth_data = api.login(private_key, wallet_address, account_number)
+                if not auth_data or not api.check_cookies():
+                    self._write_failure(private_key, wallet_address)
                     return False
-            
-            sleep(random.uniform(1, 3))
-            auth_data = api.login(private_key, wallet_address, account_number)
-            
-            if not auth_data or not api.check_cookies():
-                self._write_failure(private_key, wallet_address)
-                return False
 
-            sleep(random.uniform(1, 3))
-            token = api.get_token(auth_data, wallet_address, account_number)
-            if not token:
-                self._write_failure(private_key, wallet_address)
-                return False
+                token = api.get_token(auth_data, wallet_address, account_number)
+                if not token:
+                    self._write_failure(private_key, wallet_address)
+                    return False
 
-            sleep(random.uniform(1, 3))
             success = False
 
             if self.config['tactic']['enabled']:
