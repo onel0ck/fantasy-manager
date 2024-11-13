@@ -174,7 +174,26 @@ class FantasyAPI:
             error_log(str(ex))
             return False
 
+    def handle_token_error(self, response, token, private_key, wallet_address, account_number):
+        if response.status_code in [401, 403] or (
+            response.status_code == 400 and 
+            ("invalid token" in response.text.lower() or "unauthorized" in response.text.lower())
+        ):
+            info_log(f'Token error for account {account_number}, trying to refresh')
+            auth_data = self.login(private_key, wallet_address, account_number)
+            if not auth_data:
+                return None
+                
+            new_token = self.get_token(auth_data, wallet_address, account_number)
+            if not new_token:
+                return None
+                
+            return new_token
+        return token
+
     def daily_claim(self, token, wallet_address, account_number, max_retries=5):
+        private_key = self.account_storage.get_account_data(wallet_address)["private_key"]
+        
         for attempt in range(max_retries):
             try:
                 headers = {
@@ -196,6 +215,11 @@ class FantasyAPI:
                     timeout=30
                 )
 
+                new_token = self.handle_token_error(response, token, private_key, wallet_address, account_number)
+                if new_token:
+                    token = new_token
+                    continue
+
                 if response.status_code == 429:
                     retry_data = response.json()
                     retry_after = retry_data.get('retryAfter', 60)
@@ -207,12 +231,6 @@ class FantasyAPI:
                 if response.status_code == 201:
                     data = response.json()
                     if data.get("success", False):
-                        account_data = self.account_storage.get_account_data(wallet_address)
-                        self.account_storage.update_account(
-                            wallet_address,
-                            account_data["private_key"],
-                            last_daily_claim=datetime.now(pytz.UTC).isoformat()
-                        )
                         daily_streak = data.get("dailyQuestStreak", "N/A")
                         current_day = data.get("dailyQuestProgress", "N/A")
                         prize = data.get("selectedPrize", {}).get("id", "No prize selected")
