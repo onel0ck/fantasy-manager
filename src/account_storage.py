@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Optional
 import pytz
 
@@ -24,7 +24,7 @@ class AccountStorage:
             json.dump(self.data, f, indent=4)
 
     def update_account(self, address: str, private_key: str, token: Optional[str] = None,
-                      cookies: Optional[Dict] = None):
+                      cookies: Optional[Dict] = None, last_daily_claim: Optional[str] = None):
         if address not in self.data:
             self.data[address] = {
                 "private_key": private_key,
@@ -41,13 +41,19 @@ class AccountStorage:
             account_data["cookies"] = cookies
             account_data["cookies_updated_at"] = datetime.now(pytz.UTC).isoformat()
         
+        if last_daily_claim is not None:
+            account_data["last_daily_claim"] = last_daily_claim
+        
         self._save_data()
 
     def get_account_data(self, address: str) -> Optional[Dict]:
         return self.data.get(address)
 
-    def is_token_valid(self, address: str) -> bool:
+    def get_next_daily_claim_time(self, address: str) -> Optional[datetime]:
         account_data = self.get_account_data(address)
-        if not account_data or "token" not in account_data:
-            return False
-        return True
+        if not account_data or "last_daily_claim" not in account_data:
+            return None
+
+        last_claim = datetime.fromisoformat(account_data["last_daily_claim"])
+        next_claim = last_claim.replace(tzinfo=pytz.UTC) + timedelta(hours=24)
+        return next_claim if next_claim > datetime.now(pytz.UTC) else None
