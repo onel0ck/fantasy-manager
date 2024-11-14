@@ -1,6 +1,6 @@
 {
     "app": {
-        "threads": 15,
+        "threads": 10,
         "keys_file": "data/keys_and_addresses.txt",
         "proxy_file": "data/proxys.txt",
         "success_file": "logs/success_accounts.txt",
@@ -13,7 +13,7 @@
         "balance_check_delay": 3
     },
     "rpc": {
-        "url": "https://blast-rpc.publicnode.com"
+        "url": "https://blastl2-mainnet.public.blastapi.io"
     },
     "tactic": {
         "enabled": false,
