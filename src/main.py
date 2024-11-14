@@ -1,5 +1,6 @@
 import math
 import random
+import time
 from time import sleep
 import requests
 from web3 import Web3
@@ -14,8 +15,29 @@ class FantasyProcessor:
         self.proxies_cycle = proxies_cycle
         self.user_agents_cycle = user_agents_cycle
         self.account_storage = AccountStorage()
-        
+        self.last_request_time = 0
+        self.min_request_interval = 3
+
+    def _wait_rate_limit(self):
+        current_time = time.time()
+        time_since_last = current_time - self.last_request_time
+        if time_since_last < self.min_request_interval:
+            sleep_time = self.min_request_interval - time_since_last
+            sleep(sleep_time)
+        self.last_request_time = time.time()
+
+    def _refresh_proxy(self, api):
+        new_proxy = {
+            "http": next(self.proxies_cycle),
+            "https": next(self.proxies_cycle)
+        }
+        api.proxies = new_proxy
+        api.session.proxies = new_proxy
+        return new_proxy
+
     def process_account(self, account_number, private_key, wallet_address, total_accounts):
+        self._wait_rate_limit()
+        
         session = requests.Session()
         proxy = {
             "http": next(self.proxies_cycle),
@@ -36,84 +58,107 @@ class FantasyProcessor:
         info_log(f'Processing account {account_number}: {wallet_address}')
         
         try:
+            token = None
             account_data = self.account_storage.get_account_data(wallet_address)
-            need_login = True
             
-            if account_data and self.account_storage.is_token_valid(wallet_address):
-                token = account_data.get("token")
-                cookies = account_data.get("cookies", {})
+            if account_data:
+                stored_token = account_data.get('token')
+                stored_cookies = account_data.get('cookies')
                 
-                if token and cookies:
-                    for cookie_name, cookie_value in cookies.items():
+                if stored_token and stored_cookies:
+                    for cookie_name, cookie_value in stored_cookies.items():
                         session.cookies.set(cookie_name, cookie_value)
-                    need_login = False
+                    
+                    if api.token_manager.validate_token(stored_token):
+                        token = stored_token
+
+            task_success = False
+            task_attempted = False
             
-            if need_login:
-                auth_data = api.login(private_key, wallet_address, account_number)
-                if not auth_data or not api.check_cookies():
-                    self._write_failure(private_key, wallet_address)
-                    return False
-
-                token = api.get_token(auth_data, wallet_address, account_number)
+            while not task_attempted or (not task_success and token):
+                task_attempted = True
+                
                 if not token:
-                    self._write_failure(private_key, wallet_address)
-                    return False
+                    success, new_token = self._perform_login(api, private_key, wallet_address, account_number)
+                    if not success:
+                        sleep(random.uniform(3, 5))
+                        continue
+                    token = new_token
 
-            success = False
+                try:
+                    if self.config['daily']['enabled']:
+                        daily_result = api.daily_claim(token, wallet_address, account_number)
+                        if daily_result is True:
+                            task_success = True
+                            break
+                        elif isinstance(daily_result, str) and "Unauthorized" in daily_result:
+                            info_log(f'Token expired, refreshing login for account {account_number}')
+                            sleep(5)
+                            token = None
+                            continue
+                        
+                except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError):
+                    info_log(f'Proxy error during task for account {account_number}, refreshing proxy')
+                    self._refresh_proxy(api)
+                    sleep(5)
+                    continue
 
-            if self.config['tactic']['enabled']:
-                if self.config['app']['old_account']:
-                    if api.toggle_free_tactics(token, wallet_address, account_number):
-                        if api.tactic_claim(token, wallet_address, account_number, total_accounts):
-                            success = True
-                else:
-                    if api.tactic_claim(token, wallet_address, account_number, total_accounts):
-                        success = True
-
-            if self.config['daily']['enabled']:
-                if api.daily_claim(token, wallet_address, account_number):
-                    success = True
-
-            if self.config['quest']['enabled']:
-                for quest_id in self.config['quest']['ids']:
-                    info_log(f'Processing quest ID: {quest_id} for account {account_number}')
-                    if api.quest_claim(token, wallet_address, account_number, quest_id):
-                        success = True
-                    sleep(random.uniform(1, 3))
-
-            if self.config['app']['old_account']:
-                with open(self.config['app']['keys_file'], 'r') as f:
-                    accounts = [(i, line.strip().split(':')) for i, line in enumerate(f.readlines(), 1)]
-                
-                current_index = next((i for i, (num, (pk, addr)) in enumerate(accounts) if pk == private_key), None)
-                
-                if current_index is not None and current_index + 1 < len(accounts):
-                    next_private_key, next_address = accounts[current_index + 1][1]
-                    if api.transfer_eth(private_key, wallet_address, next_address):
-                        success_log(f'Successfully transferred ETH to next account: {next_address}')
-                    else:
-                        error_log(f'Failed to transfer ETH to next account: {next_address}')
-
-            if self.config['info_check']:
-                if api.info(token, wallet_address, account_number):
-                    success = True
-
-            if success:
+            if task_success:
                 self._write_success(private_key, wallet_address)
-            else:
-                self._write_failure(private_key, wallet_address)
+                sleep(random.uniform(2, 4))
 
         except Exception as e:
-            error_log(f'Account processing error {account_number}: {str(e)}')
-            self._write_failure(private_key, wallet_address)
+            info_log(f'Processing error for account {account_number}: {str(e)}')
+            sleep(random.uniform(3, 5))
             return False
         finally:
             session.close()
 
+    def _perform_login(self, api, private_key, wallet_address, account_number):
+        base_delay = 15
+        max_attempts = 3
+        max_proxy_retries = 2
+        
+        for attempt in range(max_attempts):
+            proxy_retries = 0
+            while proxy_retries <= max_proxy_retries:
+                try:
+                    self._wait_rate_limit()
+                    auth_data = api.login(private_key, wallet_address, account_number)
+                    
+                    if auth_data and api.check_cookies():
+                        self._wait_rate_limit()
+                        token = api.get_token(auth_data, wallet_address, account_number)
+                        if token:
+                            return True, token
+                        elif "Invalid Privy token" in str(auth_data):
+                            break  # Переходим к следующей основной попытке
+                    
+                    break  # Если нет ошибки прокси, выходим из внутреннего цикла
+                    
+                except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError) as e:
+                    proxy_retries += 1
+                    if proxy_retries <= max_proxy_retries:
+                        info_log(f'Proxy error for account {account_number}, switching proxy and retrying')
+                        new_proxy = self._refresh_proxy(api)
+                        info_log(f'New proxy assigned for account {account_number}')
+                        sleep(5)
+                        continue
+                    break
+                
+                except Exception as e:
+                    info_log(f'Unexpected error during login attempt for account {account_number}: {str(e)}')
+                    break
+            
+            if attempt < max_attempts - 1:
+                delay = base_delay * (attempt + 1) + random.uniform(1, 5)
+                info_log(f'Login attempt {attempt + 1} failed for account {account_number}, waiting {int(delay)} seconds')
+                sleep(delay)
+            else:
+                info_log(f'All login attempts failed for account {account_number}')
+        
+        return False, None
+
     def _write_success(self, private_key, wallet_address):
         with open(self.config['app']['success_file'], 'a') as f:
-            f.write(f'{private_key}:{wallet_address}\n')
-
-    def _write_failure(self, private_key, wallet_address):
-        with open(self.config['app']['failure_file'], 'a') as f:
             f.write(f'{private_key}:{wallet_address}\n')
