@@ -5,12 +5,98 @@ import random
 import requests
 from web3 import Web3
 from eth_account.messages import encode_defunct
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil import parser
 import pytz
+import math
+import jwt
+from typing import Dict, Optional, Tuple
 from colorama import Fore
 from .utils import error_log, success_log, info_log
 from .account_storage import AccountStorage
+
+class TokenManager:
+    def __init__(self, account_storage, api_instance):
+        self.account_storage = account_storage
+        self.api = api_instance
+        self.max_retries = 2
+
+    def validate_token(self, token: str) -> bool:
+        try:
+            decoded = jwt.decode(token, options={"verify_signature": False})
+            exp_timestamp = decoded.get('exp')
+            if not exp_timestamp:
+                return False
+            
+            expiration = datetime.fromtimestamp(exp_timestamp, pytz.UTC)
+            current_time = datetime.now(pytz.UTC)
+            
+            return current_time < (expiration - timedelta(minutes=5))
+        except jwt.InvalidTokenError:
+            return False
+
+    def validate_cookies(self, cookies: dict) -> bool:
+        required_cookies = {
+            'privy-token',
+            'privy-session',
+            'privy-access-token',
+            'privy-refresh-token'
+        }
+        return all(cookie in cookies for cookie in required_cookies)
+
+    def check_stored_credentials(self, wallet_address: str) -> tuple[bool, Optional[str], Optional[dict]]:
+        account_data = self.account_storage.get_account_data(wallet_address)
+        if not account_data:
+            return False, None, None
+
+        token = account_data.get('token')
+        cookies = account_data.get('cookies')
+
+        if not token or not cookies:
+            return False, None, None
+
+        if not self.validate_token(token) or not self.validate_cookies(cookies):
+            return False, None, None
+
+        return True, token, cookies
+
+    def try_stored_credentials(self, wallet_address: str, account_number: int) -> Tuple[bool, Optional[str]]:
+        is_valid, token, cookies = self.check_stored_credentials(wallet_address)
+        if not is_valid:
+            return False, None
+
+        for cookie_name, cookie_value in cookies.items():
+            self.api.session.cookies.set(cookie_name, cookie_value)
+
+        for attempt in range(self.max_retries):
+            try:
+                success = self._test_token(token, wallet_address, account_number)
+                if success:
+                    return True, token
+            except Exception as e:
+                logging.error(f"Error testing stored credentials (attempt {attempt + 1}): {str(e)}")
+                sleep(2)
+
+        return False, None
+
+    def _test_token(self, token: str, wallet_address: str, account_number: int) -> bool:
+        headers = {
+            'Accept': 'application/json, text/plain, */*',
+            'Authorization': f'Bearer {token}',
+            'Origin': 'https://fantasy.top',
+            'Referer': 'https://fantasy.top/',
+        }
+        
+        try:
+            response = self.api.session.get(
+                'https://fantasy.top/api/get-player-basic-data',
+                params={"playerId": wallet_address},
+                headers=headers,
+                proxies=self.api.proxies
+            )
+            return response.status_code == 200
+        except Exception:
+            return False
 
 class FantasyAPI:
     def __init__(self, web3_provider, session, proxies, config, user_agent, account_storage):
@@ -22,6 +108,7 @@ class FantasyAPI:
         self.base_url = "https://fantasy.top"
         self.api_url = "https://api-v2.fantasy.top"
         self.account_storage = account_storage
+        self.token_manager = TokenManager(account_storage, self)
 
     def get_headers(self, token=None):
         headers = {
@@ -36,15 +123,6 @@ class FantasyAPI:
         return headers
 
     def login(self, private_key, wallet_address, account_number):
-        account_data = self.account_storage.get_account_data(wallet_address)
-        
-        if account_data and self.account_storage.is_token_valid(wallet_address):
-            token = account_data.get("token")
-            if token:
-                for cookie_name, cookie_value in account_data.get("cookies", {}).items():
-                    self.session.cookies.set(cookie_name, cookie_value)
-                return {"success": True}
-
         try:
             init_payload = {'address': wallet_address}
             init_headers = {
@@ -130,10 +208,6 @@ class FantasyAPI:
             return False
 
     def get_token(self, auth_data, wallet_address, account_number):
-        account_data = self.account_storage.get_account_data(wallet_address)
-        if account_data and self.account_storage.is_token_valid(wallet_address):
-            return account_data.get("token")
-
         try:
             headers = {
                 'Accept': 'application/json, text/plain, */*',
@@ -160,40 +234,26 @@ class FantasyAPI:
                 if token:
                     self.account_storage.update_account(
                         wallet_address,
-                        account_data["private_key"],
+                        self.account_storage.get_account_data(wallet_address)["private_key"],
                         token=token
                     )
                 info_log(f'Privy request successful for account {account_number}: {wallet_address}')
                 return token
+            elif response.status_code == 401 and "Invalid Privy token" in response.text:
+                info_log(f'Need to refresh token for account {account_number}: {wallet_address}')
+                info_log(response.text)
+                return False
             else:
                 error_log(f'Error during Privy request for account {account_number}: {wallet_address}|Status Code: {response.status_code}')
                 error_log(response.text)
                 return False
+
         except requests.exceptions.RequestException as ex:
             error_log(f'Error during Privy request for account {account_number}: {wallet_address}')
             error_log(str(ex))
             return False
 
-    def handle_token_error(self, response, token, private_key, wallet_address, account_number):
-        if response.status_code in [401, 403] or (
-            response.status_code == 400 and 
-            ("invalid token" in response.text.lower() or "unauthorized" in response.text.lower())
-        ):
-            info_log(f'Token error for account {account_number}, trying to refresh')
-            auth_data = self.login(private_key, wallet_address, account_number)
-            if not auth_data:
-                return None
-                
-            new_token = self.get_token(auth_data, wallet_address, account_number)
-            if not new_token:
-                return None
-                
-            return new_token
-        return token
-
     def daily_claim(self, token, wallet_address, account_number, max_retries=5):
-        private_key = self.account_storage.get_account_data(wallet_address)["private_key"]
-        
         for attempt in range(max_retries):
             try:
                 headers = {
@@ -215,11 +275,6 @@ class FantasyAPI:
                     timeout=30
                 )
 
-                new_token = self.handle_token_error(response, token, private_key, wallet_address, account_number)
-                if new_token:
-                    token = new_token
-                    continue
-
                 if response.status_code == 429:
                     retry_data = response.json()
                     retry_after = retry_data.get('retryAfter', 60)
@@ -231,6 +286,12 @@ class FantasyAPI:
                 if response.status_code == 201:
                     data = response.json()
                     if data.get("success", False):
+                        account_data = self.account_storage.get_account_data(wallet_address)
+                        self.account_storage.update_account(
+                            wallet_address,
+                            account_data["private_key"],
+                            last_daily_claim=datetime.now(pytz.UTC).isoformat()
+                        )
                         daily_streak = data.get("dailyQuestStreak", "N/A")
                         current_day = data.get("dailyQuestProgress", "N/A")
                         prize = data.get("selectedPrize", {}).get("id", "No prize selected")
@@ -249,6 +310,14 @@ class FantasyAPI:
                         else:
                             success_log(f"{account_number} claim next $$$$$$$$$: {wallet_address}: {response.text}")
                         return True
+                elif response.status_code == 401:
+                    info_log(f'Token expired for account {account_number}: {wallet_address}')
+                    info_log(response.text)
+                    if attempt == max_retries - 1:
+                        return response.text
+                    else:
+                        sleep(5)
+                        continue
                 else:
                     if attempt == max_retries - 1:
                         error_log(f'Error during daily claim for account {account_number}: {wallet_address} | Status Code: {response.status_code}')
@@ -271,235 +340,299 @@ class FantasyAPI:
 
         return False
 
-    def quest_claim(self, token, wallet_address, account_number, quest_id):
-        try:
-            headers = {
-                'Accept': '*/*',
-                'Accept-Encoding': 'gzip, deflate, br, zstd',
-                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-                'Authorization': f'Bearer {token}',
-                'Content-Length': '50',
-                'Content-Type': 'application/json',
-                'Origin': self.base_url,
-                'Referer': f'{self.base_url}/rewards',
-                'User-Agent': self.user_agent
-            }
+    def quest_claim(self, token, wallet_address, account_number, quest_id, max_retries=5):
+        private_key = self.account_storage.get_account_data(wallet_address)["private_key"]
+        
+        for attempt in range(max_retries):
+            try:
+                headers = {
+                    'Accept': '*/*',
+                    'Accept-Encoding': 'gzip, deflate, br, zstd',
+                    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Authorization': f'Bearer {token}',
+                    'Content-Length': '50',
+                    'Content-Type': 'application/json',
+                    'Origin': self.base_url,
+                    'Referer': f'{self.base_url}/rewards',
+                    'User-Agent': self.user_agent
+                }
 
-            payload = {
-                "playerId": wallet_address,
-                "questThresholdId": quest_id
-            }
+                payload = {
+                    "playerId": wallet_address,
+                    "questThresholdId": quest_id
+                }
 
-            response = self.session.post(
-                f'{self.api_url}/quest/claim',
-                json=payload,
-                headers=headers,
-                proxies=self.proxies
-            )
+                response = self.session.post(
+                    f'{self.api_url}/quest/claim',
+                    json=payload,
+                    headers=headers,
+                    proxies=self.proxies
+                )
 
-            if response.status_code == 201:
-                success_log(f'Successfully claimed quest {quest_id} for account {account_number}: {wallet_address}')
-                return True
-            elif response.status_code == 429:
-                error_log(f'Too many requests. Waiting before retry for account {account_number}: {wallet_address}')
-                sleep(10)
-                return self.quest_claim(token, wallet_address, account_number, quest_id)
-            else:
-                error_log(f'Quest claim failed for account {account_number}: {wallet_address}!')
-                error_log(response.text)
-                return False
-        except requests.exceptions.RequestException as e:
-            error_log(f'Error during quest claim request for account {account_number}: {wallet_address}')
-            error_log(str(e))
-            return False
+                if response.status_code == 201:
+                    success_log(f'Successfully claimed quest {quest_id} for account {account_number}: {wallet_address}')
+                    return True
+                elif response.status_code == 429:
+                    error_log(f'Too many requests. Waiting before retry for account {account_number}: {wallet_address}')
+                    sleep(10)
+                    continue
+                else:
+                    if attempt == max_retries - 1:
+                        error_log(f'Quest claim failed for account {account_number}: {wallet_address}!')
+                        error_log(response.text)
+                        return False
+                    else:
+                        info_log(f'Retrying quest claim for account {account_number}. Attempt {attempt + 1}/{max_retries}')
+                        account_data = self.login(private_key, wallet_address, account_number)
+                        if account_data:
+                            new_token = self.get_token(account_data, wallet_address, account_number)
+                            if new_token:
+                                token = new_token
+                        sleep(5)
+                        continue
+
+            except requests.exceptions.RequestException as e:
+                if attempt == max_retries - 1:
+                    error_log(f'Error during quest claim request for account {account_number}: {wallet_address}')
+                    error_log(str(e))
+                    return False
+                else:
+                    info_log(f'Connection error, retrying quest claim for account {account_number}. Attempt {attempt + 1}/{max_retries}')
+                    sleep(5)
+                    continue
+        return False
 
     def tactic_claim(self, token, wallet_address, account_number, total_accounts):
-        try:
-            headers = {
-                'Accept': '*/*',
-                'Accept-Encoding': 'gzip, deflate, br, zstd',
-                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-                'Authorization': f'Bearer {token}',
-                'Content-Type': 'application/json',
-                'Origin': self.base_url,
-                'Referer': f'{self.base_url}/play/tactics',
-                'User-Agent': self.user_agent
-            }
+        private_key = self.account_storage.get_account_data(wallet_address)["private_key"]
+        max_retries = 5
+        
+        for attempt in range(max_retries):
+            try:
+                headers = {
+                    'Accept': '*/*',
+                    'Accept-Encoding': 'gzip, deflate, br, zstd',
+                    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Authorization': f'Bearer {token}',
+                    'Content-Type': 'application/json',
+                    'Origin': self.base_url,
+                    'Referer': f'{self.base_url}/play/tactics',
+                    'User-Agent': self.user_agent
+                }
 
-            register_response = self.session.post(
-                f'{self.base_url}/api/tactics/register',
-                json={"tacticId": self.config['tactic']['id']},
-                headers=headers,
-                proxies=self.proxies
-            )
+                register_response = self.session.post(
+                    f'{self.base_url}/api/tactics/register',
+                    json={"tacticId": self.config['tactic']['id']},
+                    headers=headers,
+                    proxies=self.proxies
+                )
 
-            if register_response.status_code == 400:
-                success_log(f'DECK REGISTER {account_number}')
-                return True
+                if register_response.status_code == 400:
+                    success_log(f'DECK REGISTER {account_number}')
+                    return True
 
-            if register_response.status_code != 200:
-                error_log(f'Error registering tactic for account {account_number}. Status Code: {register_response.status_code}')
-                error_log(register_response.text)
-                return False
+                if register_response.status_code != 200:
+                    if attempt == max_retries - 1:
+                        error_log(f'Error registering tactic for account {account_number}. Status Code: {register_response.status_code}')
+                        error_log(register_response.text)
+                        return False
+                    else:
+                        info_log(f'Retrying tactic registration for account {account_number}. Attempt {attempt + 1}/{max_retries}')
+                        account_data = self.login(private_key, wallet_address, account_number)
+                        if account_data:
+                            new_token = self.get_token(account_data, wallet_address, account_number)
+                            if new_token:
+                                token = new_token
+                        sleep(5)
+                        continue
 
-            tactic_id = register_response.json().get('id')
-            info_log(f'Register: {account_number}: ID tactic {tactic_id}')
+                tactic_id = register_response.json().get('id')
+                info_log(f'Register: {account_number}: ID tactic {tactic_id}')
 
-            sleep(random.uniform(2, 5))
+                sleep(random.uniform(2, 5))
 
-            max_attempts = 3
-            deck = None
-            
-            for attempt in range(max_attempts):
-                try:
-                    deck_response = self.session.get(
-                        f'{self.api_url}/tactics/entry/{tactic_id}/choices',
-                        headers=self.get_headers(token),
-                        proxies=self.proxies
-                    )
-                    
-                    if deck_response.status_code == 200:
-                        deck = deck_response.json()
-                        if isinstance(deck, dict) and 'hero_choices' in deck:
-                            break
+                max_deck_attempts = 3
+                deck = None
+                
+                for deck_attempt in range(max_deck_attempts):
+                    try:
+                        deck_response = self.session.get(
+                            f'{self.api_url}/tactics/entry/{tactic_id}/choices',
+                            headers=self.get_headers(token),
+                            proxies=self.proxies
+                        )
                         
-                    error_log(f'Invalid response format on attempt {attempt + 1}')
-                    if attempt < max_attempts - 1:
-                        sleep(2)
-                        
-                except Exception as e:
-                    error_log(f'Error on attempt {attempt + 1}: {str(e)}')
-                    if attempt < max_attempts - 1:
-                        sleep(2)
-            
-            if not deck:
-                error_log(f'Failed to get valid choices after {max_attempts} attempts')
-                return False
+                        if deck_response.status_code == 200:
+                            deck = deck_response.json()
+                            if isinstance(deck, dict) and 'hero_choices' in deck:
+                                break
+                            
+                        error_log(f'Invalid response format on attempt {deck_attempt + 1}')
+                        if deck_attempt < max_deck_attempts - 1:
+                            sleep(2)
+                            
+                    except Exception as e:
+                        error_log(f'Error on attempt {deck_attempt + 1}: {str(e)}')
+                        if deck_attempt < max_deck_attempts - 1:
+                            sleep(2)
+                
+                if not deck:
+                    if attempt == max_retries - 1:
+                        error_log(f'Failed to get valid choices after {max_deck_attempts} attempts')
+                        return False
+                    else:
+                        continue
 
-            cards = deck['hero_choices']
-            stars_to_select = self._get_deck_for_account(account_number, total_accounts)
+                cards = deck['hero_choices']
+                stars_to_select = self._get_deck_for_account(account_number, total_accounts)
 
-            used_cards = []
-            hero_choices = []
-            total_stars = 0
+                used_cards = []
+                hero_choices = []
+                total_stars = 0
 
-            for stars in stars_to_select:
-                card = self._select_card_by_stars(stars, cards, used_cards)
-                if card:
-                    hero_choices.append(card)
-                    total_stars += card['hero_score']['stars']
-                else:
-                    max_allowed_stars = 24 - total_stars
-                    card = self._get_alternative_card(cards, used_cards, max_allowed_stars)
+                for stars in stars_to_select:
+                    card = self._select_card_by_stars(stars, cards, used_cards)
                     if card:
                         hero_choices.append(card)
                         total_stars += card['hero_score']['stars']
                     else:
-                        error_log(f'Error selecting alternative card with {stars} stars for account {account_number}')
+                        max_allowed_stars = 24 - total_stars
+                        card = self._get_alternative_card(cards, used_cards, max_allowed_stars)
+                        if card:
+                            hero_choices.append(card)
+                            total_stars += card['hero_score']['stars']
+                        else:
+                            error_log(f'Error selecting alternative card with {stars} stars for account {account_number}')
+                            return False
+
+                if len(hero_choices) != len(stars_to_select) or total_stars > 24:
+                    error_log(f'Invalid card selection for account {account_number}. Total stars: {total_stars}')
+                    return False
+
+                hero_choices_json = json.dumps(hero_choices)
+                payload_card = {
+                    "tacticPlayerId": tactic_id,
+                    "heroChoices": hero_choices_json
+                }
+
+                sleep(random.uniform(1, 3))
+
+                deck_upload_response = self.session.post(
+                    f'{self.base_url}/api/tactics/deck/save',
+                    json=payload_card,
+                    headers=headers,
+                    proxies=self.proxies
+                )
+
+                if deck_upload_response.status_code == 200:
+                    success_log(f'Deck saved for account {account_number}')
+                    return True
+                else:
+                    if attempt == max_retries - 1:
+                        error_log(f'Save error {account_number}. Status: {deck_upload_response.status_code}')
+                        error_log(deck_upload_response.text)
                         return False
+                    else:
+                        info_log(f'Retrying deck save for account {account_number}. Attempt {attempt + 1}/{max_retries}')
+                        account_data = self.login(private_key, wallet_address, account_number)
+                        if account_data:
+                            new_token = self.get_token(account_data, wallet_address, account_number)
+                            if new_token:
+                                token = new_token
+                        sleep(5)
+                        continue
 
-            if len(hero_choices) != len(stars_to_select) or total_stars > 24:
-                error_log(f'Invalid card selection for account {account_number}. Total stars: {total_stars}')
-                return False
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    error_log(f'Tactic claim error for account {account_number}: {str(e)}')
+                    return False
+                else:
+                    info_log(f'Error in tactic claim, retrying for account {account_number}. Attempt {attempt + 1}/{max_retries}')
+                    sleep(5)
+                    continue
 
-            hero_choices_json = json.dumps(hero_choices)
-            payload_card = {
-                "tacticPlayerId": tactic_id,
-                "heroChoices": hero_choices_json
-            }
+        return False
 
-            sleep(random.uniform(1, 3))
+    def info(self, token, wallet_address, account_number, max_retries=5):
+        private_key = self.account_storage.get_account_data(wallet_address)["private_key"]
+        
+        for attempt in range(max_retries):
+            try:
+                headers = self.get_headers(token)
+                response = self.session.get(
+                    f'{self.base_url}/api/get-player-basic-data',
+                    params={"playerId": wallet_address},
+                    headers=headers,
+                    proxies=self.proxies
+                )
 
-            deck_upload_headers = {
-                'Accept': '*/*',
-                'Accept-Encoding': 'gzip, deflate, br, zstd',
-                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-                'Authorization': f'Bearer {token}',
-                'Content-Type': 'application/json',
-                'Origin': self.base_url,
-                'Referer': f'{self.base_url}/play/tactics',
-                'User-Agent': self.user_agent
-            }
+                if response.status_code == 200:
+                    data = response.json()
+                    player_data = data.get('players_by_pk', {})
+                    
+                    fantasy_points = player_data.get('fantasy_points', 0)
+                    stars = player_data.get('stars', 0)
+                    is_onboarding_done = player_data.get('is_onboarding_done', False)
+                    gold = player_data.get('gold', '0')
+                    portfolio_value = player_data.get('portfolio_value', 0)
+                    number_of_cards = player_data.get('number_of_cards', '0')
+                    rewards = data.get('rewards', [])
 
-            deck_upload_response = self.session.post(
-                f'{self.base_url}/api/tactics/deck/save',
-                json=payload_card,
-                headers=deck_upload_headers,
-                proxies=self.proxies
-            )
+                    result_line = (f"{wallet_address}:"
+                                f"stars={stars}:"
+                                f"is_onboarding_done={is_onboarding_done}:"
+                                f"gold={gold}:"
+                                f"portfolio_value={portfolio_value}:"
+                                f"number_of_cards={number_of_cards}:"
+                                f"rewards={'Yes' if rewards else 'No'}:"
+                                f"fantasy_points={fantasy_points}")
 
-            if deck_upload_response.status_code == 200:
-                success_log(f'Deck saved for account {account_number}')
-                return True
-            else:
-                error_log(f'Save error {account_number}. Status: {deck_upload_response.status_code}')
-                error_log(deck_upload_response.text)
-                return False
+                    with open(self.config['app']['result_file'], 'a') as f:
+                        f.write(result_line + '\n')
 
-        except Exception as e:
-            error_log(f'Tactic claim error for account {account_number}: {str(e)}')
-            return False
+                    success_log(f"Info collected for account {account_number}: {wallet_address}")
+                    return True
+                else:
+                    if attempt == max_retries - 1:
+                        error_log(f'Error getting info for account {account_number}: {wallet_address} | Status Code: {response.status_code}')
+                        error_log(response.text)
+                        return False
+                    else:
+                        info_log(f'Retrying info request for account {account_number}. Attempt {attempt + 1}/{max_retries}')
+                        account_data = self.login(private_key, wallet_address, account_number)
+                        if account_data:
+                            new_token = self.get_token(account_data, wallet_address, account_number)
+                            if new_token:
+                                token = new_token
+                        sleep(5)
+                        continue
 
-    def info(self, token, wallet_address, account_number):
-        try:
-            headers = self.get_headers(token)
-            response = self.session.get(
-                f'{self.base_url}/api/get-player-basic-data',
-                params={"playerId": wallet_address},
-                headers=headers,
-                proxies=self.proxies
-            )
+            except Exception as ex:
+                if attempt == max_retries - 1:
+                    error_log(f"Error in info function for account {account_number}: {wallet_address}")
+                    error_log(str(ex))
+                    return False
+                else:
+                    info_log(f'Connection error, retrying info request for account {account_number}. Attempt {attempt + 1}/{max_retries}')
+                    sleep(5)
+                    continue
 
-            if response.status_code == 200:
-                data = response.json()
-                player_data = data.get('players_by_pk', {})
-                
-                fantasy_points = player_data.get('fantasy_points', 0)
-                stars = player_data.get('stars', 0)
-                is_onboarding_done = player_data.get('is_onboarding_done', False)
-                gold = player_data.get('gold', '0')
-                portfolio_value = player_data.get('portfolio_value', 0)
-                number_of_cards = player_data.get('number_of_cards', '0')
-                rewards = data.get('rewards', [])
-
-                result_line = (f"{wallet_address}:"
-                             f"stars={stars}:"
-                             f"is_onboarding_done={is_onboarding_done}:"
-                             f"gold={gold}:"
-                             f"portfolio_value={portfolio_value}:"
-                             f"number_of_cards={number_of_cards}:"
-                             f"rewards={'Yes' if rewards else 'No'}:"
-                             f"fantasy_points={fantasy_points}")
-
-                with open(self.config['app']['result_file'], 'a') as f:
-                    f.write(result_line + '\n')
-
-                success_log(f"Info collected for account {account_number}: {wallet_address}")
-                return True
-            else:
-                error_log(f'Error getting info for account {account_number}: {wallet_address} | Status Code: {response.status_code}')
-                error_log(response.text)
-                return False
-
-        except Exception as ex:
-            error_log(f"Error in info function for account {account_number}: {wallet_address}")
-            error_log(str(ex))
-            return False
+        return False
 
     def toggle_free_tactics(self, token, wallet_address, account_number):
-        headers = {
-            'Accept': 'application/json, text/plain, */*',
-            'Authorization': f'Bearer {token}',
-            'Origin': self.base_url,
-            'Referer': f'{self.base_url}/',
-            'User-Agent': self.user_agent
-        }
-
+        private_key = self.account_storage.get_account_data(wallet_address)["private_key"]
         max_attempts = self.config['tactic']['max_toggle_attempts']
         delay = self.config['tactic']['delay_between_attempts']
 
         for attempt in range(max_attempts):
             try:
+                headers = {
+                    'Accept': 'application/json, text/plain, */*',
+                    'Authorization': f'Bearer {token}',
+                    'Origin': self.base_url,
+                    'Referer': f'{self.base_url}/',
+                    'User-Agent': self.user_agent
+                }
+
                 response = self.session.post(
                     f'{self.api_url}/tactics/toggle-can-play-free-tactics',
                     headers=headers,
@@ -515,12 +648,25 @@ class FantasyAPI:
                         info_log(f'Attempt {attempt + 1}: Tactics not yet enabled')
                         sleep(delay)
                 else:
-                    error_log(f'Toggle request failed: {response.status_code}')
-                    sleep(delay)
+                    if attempt == max_attempts - 1:
+                        error_log(f'Toggle request failed: {response.status_code}')
+                        return False
+                    else:
+                        info_log(f'Retrying toggle for account {account_number}. Attempt {attempt + 1}/{max_attempts}')
+                        account_data = self.login(private_key, wallet_address, account_number)
+                        if account_data:
+                            new_token = self.get_token(account_data, wallet_address, account_number)
+                            if new_token:
+                                token = new_token
+                        sleep(delay)
 
             except Exception as e:
-                error_log(f'Toggle attempt {attempt + 1} error: {str(e)}')
-                sleep(delay)
+                if attempt == max_attempts - 1:
+                    error_log(f'Toggle attempt {attempt + 1} error: {str(e)}')
+                    return False
+                else:
+                    info_log(f'Connection error, retrying toggle for account {account_number}. Attempt {attempt + 1}/{max_attempts}')
+                    sleep(delay)
 
         return False
 
