@@ -35,7 +35,7 @@ def main():
     
     try:
         config = load_config()
-        proxies_cycle = read_proxies(config['app']['proxy_file'])
+        proxies_dict, all_proxies = read_proxies(config['app']['proxy_file'])
         user_agents_cycle = read_user_agents()
         accounts = read_accounts(config['app']['keys_file'])
         
@@ -46,17 +46,23 @@ def main():
 
         print(f"\n{Fore.YELLOW}Total accounts to process: {total_accounts}")
         print(f"{Fore.YELLOW}Number of threads: {config['app']['threads']}")
-        countdown_timer(5)
+        print(f"{Fore.GREEN}Starting now!")
 
         processor = FantasyProcessor(
             config=config,
-            proxies_cycle=proxies_cycle,
+            proxies_dict=proxies_dict,
+            all_proxies=all_proxies,
             user_agents_cycle=user_agents_cycle
         )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=config['app']['threads']) as executor:
             futures = []
-            for account_number, (private_key, wallet_address) in accounts:
+            for account_number, account_data in accounts:
+                if len(account_data) != 2:
+                    error_log(f"Invalid account data format for account {account_number}")
+                    continue
+                    
+                private_key, wallet_address = account_data
                 future = executor.submit(
                     processor.process_account,
                     account_number,
@@ -65,9 +71,12 @@ def main():
                     total_accounts
                 )
                 futures.append(future)
-                sleep(0.1)
 
-            concurrent.futures.wait(futures)
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    error_log(f"Error processing account: {str(e)}")
 
     except KeyboardInterrupt:
         print(f"\n{Fore.RED}Script interrupted by user")
