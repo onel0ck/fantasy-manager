@@ -6,15 +6,12 @@ Advanced automation tool for Fantasy.top daily claims and interactions.
 
 ## Features
 - Multi-account support with parallel processing
-- Support for both new and legacy accounts
-- Smart token and session management system
-- Proxy support with automatic rotation and error handling
+- Static proxy support with account binding
+- Automatic proxy rotation on errors
+- Smart token management system
 - Daily claims automation with cooldown tracking
-- Tactic registration and deck building
-- Multi-quest support
 - Detailed logging system
-- Automatic retry system for failed requests
-- Rate limiting protection
+- Rate limit protection with proxy switching
 
 ## Important Setup Notes
 
@@ -22,7 +19,7 @@ Advanced automation tool for Fantasy.top daily claims and interactions.
 The script maintains account data in `data/accounts_data.json`:
 - Bearer tokens and session data
 - Cookies and authentication information
-- Last claim timestamps
+- Last claim timestamps and next claim times
 - Account creation dates
 
 Example account data structure:
@@ -39,28 +36,23 @@ Example account data structure:
             "privy-access-token": "COOKIE_VALUE"
         },
         "cookies_updated_at": "2024-11-12T10:00:00.000000Z",
-        "last_daily_claim": "2024-11-12T10:00:00.000000Z"
+        "last_daily_claim": "2024-11-12T10:00:00.000000Z",
+        "next_daily_claim": "2024-11-13T10:00:00.000000Z"
     }
 }
 ```
 
-### Smart Token Management
-- Automatically reuses valid tokens and sessions
-- Handles token expiration and renewal
-- Maintains session persistence between runs
-- Reduces unnecessary authentication requests
-
-### Rate Limit Protection
-- Smart delay system between requests
-- Automatic proxy rotation on errors
-- Exponential backoff for failed attempts
-- Request distribution across multiple proxies
+### Smart Proxy Management
+- Each account has its dedicated static proxy
+- Automatic proxy rotation on rate limits or errors
+- Proxy validation and error handling
+- Random proxy selection from pool for retries
 
 ### Configuration Example
 ```json
 {
     "app": {
-        "threads": 10,
+        "threads": 5,
         "keys_file": "data/keys_and_addresses.txt",
         "proxy_file": "data/proxys.txt",
         "success_file": "logs/success_accounts.txt",
@@ -74,24 +66,6 @@ Example account data structure:
     },
     "rpc": {
         "url": "https://blastl2-mainnet.public.blastapi.io"
-    },
-    "tactic": {
-        "enabled": false,
-        "id": "your_id",
-        "max_toggle_attempts": 15,
-        "delay_between_attempts": 5,
-        "decks": [
-            [7, 6, 5, 3, 2],
-            [7, 6, 5, 3, 2],
-            [6, 6, 5, 4, 2],
-        ]
-    },
-    "quest": {
-        "enabled": false,
-        "ids": [
-            "ea7c4f8a-0db8-4a9d-a840-5f76cfb1fad5",
-            "ba57e629-9aee-4a2b-a02c-14713725f941"
-        ]
     },
     "daily": {
         "enabled": true
@@ -126,26 +100,23 @@ private_key2:address2
 ```
 
 ### Proxy Format (proxys.txt)
+Each line corresponds to the account with the same line number:
 ```
 http://login:password@ip:port
 http://login:password@ip:port
 ```
 
 ## Operation Flow
-1. Load and validate stored account data
-2. Smart authentication using stored tokens
-3. Execute enabled operations:
-   - Tactic operations
-   - Daily claims
-   - Quest claims
-4. Update account data storage
-5. Handle any failures with automatic retries
+1. Account and proxy binding
+2. Smart authentication with retry system
+3. Execute daily claims
+4. Handle failures with proxy rotation
+5. Track success and failures
 
 ## Advanced Features
-- Proxy error handling with automatic switching
-- Smart delay system to prevent rate limits
-- Session persistence for efficiency
-- Automatic token refresh when needed
+- Static proxy binding for consistent account usage
+- Automatic proxy rotation on rate limits
+- Smart retry system with proxy switching
 - Detailed success/failure tracking
 
 ## Logs
