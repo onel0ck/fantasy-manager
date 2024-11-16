@@ -215,9 +215,16 @@ def load_config():
         raise FileNotFoundError(f"Config file not found at {config_path}")
 
 def read_proxies(proxy_file):
+    proxies_dict = {}
+    all_proxies = []
+    
     with open(proxy_file, 'r') as f:
-        proxies = [line.strip() for line in f if line.strip()]
-        return cycle(proxies)
+        for idx, line in enumerate(f.readlines(), 1):
+            if line.strip():
+                proxies_dict[idx] = line.strip()
+                all_proxies.append(line.strip())
+    
+    return proxies_dict, all_proxies
 
 def read_accounts(file_path):
     with open(file_path, 'r') as f:
