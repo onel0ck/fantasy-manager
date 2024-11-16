@@ -75,6 +75,7 @@ Example account data structure:
 ```
 
 ## Setup Process
+
 1. Clone repository:
 ```bash
 git clone https://github.com/onel0ck/fantasy-manager.git
@@ -132,6 +133,9 @@ Run the script:
 ```bash
 python run.py
 ```
+
+## License
+See [LICENSE](LICENSE) file for rights and limitations.
 
 ## Support
 Telegram: [@unluck_1l0ck](https://t.me/unluck_1l0ck)
