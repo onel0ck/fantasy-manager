@@ -1,55 +1,75 @@
 import math
 import random
 import time
+import threading
 from time import sleep
 import requests
 from web3 import Web3
 from colorama import Fore
-from .api import FantasyAPI
-from .utils import error_log, info_log, success_log
-from .account_storage import AccountStorage
+from src.api import FantasyAPI
+from src.utils import error_log, info_log, success_log
+from src.account_storage import AccountStorage
 
 class FantasyProcessor:
-    def __init__(self, config, proxies_cycle, user_agents_cycle):
+    def __init__(self, config, proxies_dict, all_proxies, user_agents_cycle):
         self.config = config
-        self.proxies_cycle = proxies_cycle
+        self.proxies = proxies_dict
+        self.all_proxies = all_proxies
         self.user_agents_cycle = user_agents_cycle
         self.account_storage = AccountStorage()
-        self.last_request_time = 0
-        self.min_request_interval = 3
+        self.last_request_time = {}
+        self.min_request_interval = 2
+        self.lock = threading.Lock()
 
-    def _wait_rate_limit(self):
+    def _wait_rate_limit(self, thread_id):
         current_time = time.time()
-        time_since_last = current_time - self.last_request_time
-        if time_since_last < self.min_request_interval:
-            sleep_time = self.min_request_interval - time_since_last
-            sleep(sleep_time)
-        self.last_request_time = time.time()
+        with self.lock:
+            last_time = self.last_request_time.get(thread_id, 0)
+            time_since_last = current_time - last_time
+            if time_since_last < self.min_request_interval:
+                sleep_time = self.min_request_interval - time_since_last
+                sleep(sleep_time)
+            self.last_request_time[thread_id] = time.time()
 
-    def _refresh_proxy(self, api):
-        new_proxy = {
-            "http": next(self.proxies_cycle),
-            "https": next(self.proxies_cycle)
+    def _get_random_proxy(self):
+        with self.lock:
+            return random.choice(self.all_proxies)
+
+    def _try_with_different_proxy(self, api, account_number):
+        new_proxy = self._get_random_proxy()
+        info_log(f'Switching proxy for account {account_number} to: {new_proxy}')
+        proxy_dict = {
+            "http": new_proxy,
+            "https": new_proxy
         }
-        api.proxies = new_proxy
-        api.session.proxies = new_proxy
-        return new_proxy
+        api.proxies = proxy_dict
+        api.session.proxies = proxy_dict
+        return True
 
     def process_account(self, account_number, private_key, wallet_address, total_accounts):
-        self._wait_rate_limit()
+        thread_id = threading.get_ident()
+        self._wait_rate_limit(thread_id)
         
         session = requests.Session()
-        proxy = {
-            "http": next(self.proxies_cycle),
-            "https": next(self.proxies_cycle)
+        
+        initial_proxy = self.proxies.get(account_number)
+        if not initial_proxy:
+            error_log(f'No proxy found for account {account_number}')
+            self._write_failure(private_key, wallet_address)
+            return False
+            
+        proxy_dict = {
+            "http": initial_proxy,
+            "https": initial_proxy
         }
         
-        user_agent = next(self.user_agents_cycle)
+        with self.lock:
+            user_agent = next(self.user_agents_cycle)
         
         api = FantasyAPI(
             web3_provider=self.config['rpc']['url'],
             session=session,
-            proxies=proxy,
+            proxies=proxy_dict,
             config=self.config,
             user_agent=user_agent,
             account_storage=self.account_storage
@@ -58,107 +78,67 @@ class FantasyProcessor:
         info_log(f'Processing account {account_number}: {wallet_address}')
         
         try:
-            token = None
-            account_data = self.account_storage.get_account_data(wallet_address)
-            
-            if account_data:
-                stored_token = account_data.get('token')
-                stored_cookies = account_data.get('cookies')
-                
-                if stored_token and stored_cookies:
-                    for cookie_name, cookie_value in stored_cookies.items():
-                        session.cookies.set(cookie_name, cookie_value)
-                    
-                    if api.token_manager.validate_token(stored_token):
-                        token = stored_token
+            auth_data = api.login(private_key, wallet_address, account_number)
+            if not auth_data:
+                if self._try_with_different_proxy(api, account_number):
+                    auth_data = api.login(private_key, wallet_address, account_number)
+                    if not auth_data:
+                        error_log(f'Failed to login account {account_number}: {wallet_address}')
+                        self._write_failure(private_key, wallet_address)
+                        return False
+
+            token = api.get_token(auth_data, wallet_address, account_number)
+            if not token:
+                error_log(f'Failed to get token for account {account_number}: {wallet_address}')
+                self._write_failure(private_key, wallet_address)
+                return False
 
             task_success = False
-            task_attempted = False
-            
-            while not task_attempted or (not task_success and token):
-                task_attempted = True
                 
-                if not token:
-                    success, new_token = self._perform_login(api, private_key, wallet_address, account_number)
-                    if not success:
-                        sleep(random.uniform(3, 5))
-                        continue
-                    token = new_token
-
-                try:
-                    if self.config['daily']['enabled']:
-                        daily_result = api.daily_claim(token, wallet_address, account_number)
-                        if daily_result is True:
-                            task_success = True
-                            break
-                        elif isinstance(daily_result, str) and "Unauthorized" in daily_result:
-                            info_log(f'Token expired, refreshing login for account {account_number}')
-                            sleep(5)
-                            token = None
-                            continue
+            try:
+                if self.config['daily']['enabled']:
+                    daily_result = api.daily_claim(token, wallet_address, account_number)
+                    if daily_result is True:
+                        task_success = True
+                    else:
+                        self._write_failure(private_key, wallet_address)
                         
-                except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError):
-                    info_log(f'Proxy error during task for account {account_number}, refreshing proxy')
-                    self._refresh_proxy(api)
-                    sleep(5)
-                    continue
+            except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError):
+                if self._try_with_different_proxy(api, account_number):
+                    daily_result = api.daily_claim(token, wallet_address, account_number)
+                    if daily_result is True:
+                        task_success = True
+                    else:
+                        self._write_failure(private_key, wallet_address)
+                        return False
+                else:
+                    error_log(f'Proxy error during task for account {account_number}')
+                    self._write_failure(private_key, wallet_address)
+                    return False
 
             if task_success:
                 self._write_success(private_key, wallet_address)
-                sleep(random.uniform(2, 4))
+                return True
 
         except Exception as e:
-            info_log(f'Processing error for account {account_number}: {str(e)}')
-            sleep(random.uniform(3, 5))
+            error_log(f'Processing error for account {account_number}: {str(e)}')
+            self._write_failure(private_key, wallet_address)
             return False
         finally:
             session.close()
 
-    def _perform_login(self, api, private_key, wallet_address, account_number):
-        base_delay = 15
-        max_attempts = 3
-        max_proxy_retries = 2
-        
-        for attempt in range(max_attempts):
-            proxy_retries = 0
-            while proxy_retries <= max_proxy_retries:
-                try:
-                    self._wait_rate_limit()
-                    auth_data = api.login(private_key, wallet_address, account_number)
-                    
-                    if auth_data and api.check_cookies():
-                        self._wait_rate_limit()
-                        token = api.get_token(auth_data, wallet_address, account_number)
-                        if token:
-                            return True, token
-                        elif "Invalid Privy token" in str(auth_data):
-                            break  # Переходим к следующей основной попытке
-                    
-                    break  # Если нет ошибки прокси, выходим из внутреннего цикла
-                    
-                except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError) as e:
-                    proxy_retries += 1
-                    if proxy_retries <= max_proxy_retries:
-                        info_log(f'Proxy error for account {account_number}, switching proxy and retrying')
-                        new_proxy = self._refresh_proxy(api)
-                        info_log(f'New proxy assigned for account {account_number}')
-                        sleep(5)
-                        continue
-                    break
-                
-                except Exception as e:
-                    info_log(f'Unexpected error during login attempt for account {account_number}: {str(e)}')
-                    break
-            
-            if attempt < max_attempts - 1:
-                delay = base_delay * (attempt + 1) + random.uniform(1, 5)
-                info_log(f'Login attempt {attempt + 1} failed for account {account_number}, waiting {int(delay)} seconds')
-                sleep(delay)
-            else:
-                info_log(f'All login attempts failed for account {account_number}')
-        
-        return False, None
-
     def _write_success(self, private_key, wallet_address):
-        with open(self.config['app']['success_file'], 'a') as f:
-            f.write(f'{private_key}:{wallet_address}\n')
+        with self.lock:
+            try:
+                with open(self.config['app']['success_file'], 'a') as f:
+                    f.write(f'{private_key}:{wallet_address}\n')
+            except Exception as e:
+                error_log(f'Error writing to success file: {str(e)}')
+
+    def _write_failure(self, private_key, wallet_address):
+        with self.lock:
+            try:
+                with open(self.config['app']['failure_file'], 'a') as f:
+                    f.write(f'{private_key}:{wallet_address}\n')
+            except Exception as e:
+                error_log(f'Error writing to failure file: {str(e)}')
