@@ -2,13 +2,50 @@ import math
 import random
 import time
 import threading
+import concurrent.futures
 from time import sleep
 import requests
 from web3 import Web3
 from colorama import Fore
 from src.api import FantasyAPI
-from src.utils import error_log, info_log, success_log
+from src.utils import error_log, info_log, success_log, rate_limit_log
 from src.account_storage import AccountStorage
+
+class RetryManager:
+    def __init__(self, max_retries=3, success_threshold=0.9):
+        self.failed_accounts = set()
+        self.success_accounts = set()
+        self.attempt_counter = {}
+        self.max_retries = max_retries
+        self.success_threshold = success_threshold
+        self.lock = threading.Lock()
+
+    def add_failed_account(self, account_data):
+        with self.lock:
+            self.failed_accounts.add(account_data)
+            if account_data not in self.attempt_counter:
+                self.attempt_counter[account_data] = 1
+            else:
+                self.attempt_counter[account_data] += 1
+
+    def add_success_account(self, account_data):
+        with self.lock:
+            if account_data in self.failed_accounts:
+                self.failed_accounts.remove(account_data)
+            self.success_accounts.add(account_data)
+
+    def get_retry_accounts(self):
+        with self.lock:
+            return [acc for acc in self.failed_accounts 
+                   if self.attempt_counter[acc] < self.max_retries]
+
+    def get_success_rate(self):
+        total = len(self.success_accounts) + len(self.failed_accounts)
+        return len(self.success_accounts) / total if total > 0 else 0
+
+    def should_continue_retrying(self):
+        return (self.get_success_rate() < self.success_threshold and 
+                bool(self.get_retry_accounts()))
 
 class FantasyProcessor:
     def __init__(self, config, proxies_dict, all_proxies, user_agents_cycle):
@@ -20,6 +57,8 @@ class FantasyProcessor:
         self.last_request_time = {}
         self.min_request_interval = 2
         self.lock = threading.Lock()
+        self.retry_manager = RetryManager()
+        self.retry_delay = 5
 
     def _wait_rate_limit(self, thread_id):
         current_time = time.time()
@@ -35,97 +74,162 @@ class FantasyProcessor:
         with self.lock:
             return random.choice(self.all_proxies)
 
-    def _try_with_different_proxy(self, api, account_number):
+    def _try_with_different_proxy(self, account_number):
         new_proxy = self._get_random_proxy()
         info_log(f'Switching proxy for account {account_number} to: {new_proxy}')
         proxy_dict = {
             "http": new_proxy,
             "https": new_proxy
         }
-        api.proxies = proxy_dict
-        api.session.proxies = proxy_dict
-        return True
+        return proxy_dict
 
-    def process_account(self, account_number, private_key, wallet_address, total_accounts):
-        thread_id = threading.get_ident()
-        self._wait_rate_limit(thread_id)
-        
-        session = requests.Session()
-        
-        initial_proxy = self.proxies.get(account_number)
-        if not initial_proxy:
-            error_log(f'No proxy found for account {account_number}')
-            self._write_failure(private_key, wallet_address)
-            return False
-            
-        proxy_dict = {
-            "http": initial_proxy,
-            "https": initial_proxy
-        }
-        
-        with self.lock:
-            user_agent = next(self.user_agents_cycle)
-        
-        api = FantasyAPI(
-            web3_provider=self.config['rpc']['url'],
-            session=session,
-            proxies=proxy_dict,
-            config=self.config,
-            user_agent=user_agent,
-            account_storage=self.account_storage
-        )
-        
-        info_log(f'Processing account {account_number}: {wallet_address}')
+    def process_account_with_retry(self, account_number, private_key, wallet_address, total_accounts):
+        account_data = (account_number, private_key, wallet_address)
         
         try:
-            auth_data = api.login(private_key, wallet_address, account_number)
-            if not auth_data:
-                if self._try_with_different_proxy(api, account_number):
+            success = self.process_account(account_number, private_key, wallet_address, total_accounts)
+            if success:
+                self.retry_manager.add_success_account(account_data)
+            else:
+                self.retry_manager.add_failed_account(account_data)
+        except Exception as e:
+            error_log(f"Error processing account {account_number}: {str(e)}")
+            self.retry_manager.add_failed_account(account_data)
+
+    def process_account(self, account_number, private_key, wallet_address, total_accounts):
+        max_attempts = 7
+        current_attempt = 0
+        
+        while current_attempt < max_attempts:
+            thread_id = threading.get_ident()
+            self._wait_rate_limit(thread_id)
+            
+            session = requests.Session()
+            proxy_dict = self._try_with_different_proxy(account_number)
+            
+            with self.lock:
+                user_agent = next(self.user_agents_cycle)
+            
+            api = FantasyAPI(
+                web3_provider=self.config['rpc']['url'],
+                session=session,
+                proxies=proxy_dict,
+                config=self.config,
+                user_agent=user_agent,
+                account_storage=self.account_storage
+            )
+            
+            if current_attempt == 0:
+                info_log(f'Processing account {account_number}: {wallet_address}')
+            else:
+                info_log(f'Retrying account {account_number}: {wallet_address} (Attempt {current_attempt + 1}/{max_attempts})')
+            
+            try:
+                stored_success, stored_token, stored_cookies = api.token_manager.check_stored_credentials(wallet_address)
+                
+                if stored_success:
+                    info_log(f'Using stored credentials for account {account_number}')
+                    token = stored_token
+                    for cookie_name, cookie_value in stored_cookies.items():
+                        session.cookies.set(cookie_name, cookie_value)
+                else:
                     auth_data = api.login(private_key, wallet_address, account_number)
                     if not auth_data:
-                        error_log(f'Failed to login account {account_number}: {wallet_address}')
+                        if current_attempt == max_attempts - 1:
+                            error_log(f'Failed to login account {account_number}: {wallet_address}')
+                            self._write_failure(private_key, wallet_address)
+                            session.close()
+                            return False
+                        current_attempt += 1
+                        session.close()
+                        sleep(2)
+                        continue
+
+                    token = api.get_token(auth_data, wallet_address, account_number)
+                    if not token:
+                        if current_attempt == max_attempts - 1:
+                            error_log(f'Failed to get token for account {account_number}: {wallet_address}')
+                            self._write_failure(private_key, wallet_address)
+                            session.close()
+                            return False
+                        current_attempt += 1
+                        session.close()
+                        sleep(2)
+                        continue
+                    
+                    cookies_dict = {cookie.name: cookie.value for cookie in session.cookies}
+                    self.account_storage.update_account(
+                        wallet_address,
+                        private_key,
+                        token=token,
+                        cookies=cookies_dict
+                    )
+
+                try:
+                    if self.config['daily']['enabled']:
+                        daily_result = api.daily_claim(token, wallet_address, account_number)
+                        if daily_result is True:
+                            self._write_success(private_key, wallet_address)
+                            session.close()
+                            return True
+                        else:
+                            if stored_success:
+                                stored_success = False
+                                continue
+                            
+                            if current_attempt == max_attempts - 1:
+                                self._write_failure(private_key, wallet_address)
+                                session.close()
+                                return False
+                                
+                except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError):
+                    if current_attempt == max_attempts - 1:
+                        error_log(f'Proxy error during task for account {account_number}')
                         self._write_failure(private_key, wallet_address)
+                        session.close()
                         return False
 
-            token = api.get_token(auth_data, wallet_address, account_number)
-            if not token:
-                error_log(f'Failed to get token for account {account_number}: {wallet_address}')
-                self._write_failure(private_key, wallet_address)
-                return False
+                current_attempt += 1
+                session.close()
+                sleep(2)
 
-            task_success = False
-                
-            try:
-                if self.config['daily']['enabled']:
-                    daily_result = api.daily_claim(token, wallet_address, account_number)
-                    if daily_result is True:
-                        task_success = True
-                    else:
-                        self._write_failure(private_key, wallet_address)
-                        
-            except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError):
-                if self._try_with_different_proxy(api, account_number):
-                    daily_result = api.daily_claim(token, wallet_address, account_number)
-                    if daily_result is True:
-                        task_success = True
-                    else:
-                        self._write_failure(private_key, wallet_address)
-                        return False
-                else:
-                    error_log(f'Proxy error during task for account {account_number}')
+            except Exception as e:
+                if current_attempt == max_attempts - 1:
+                    error_log(f'Processing error for account {account_number}: {str(e)}')
                     self._write_failure(private_key, wallet_address)
+                    session.close()
                     return False
+                current_attempt += 1
+                session.close()
+                sleep(2)
+                continue
 
-            if task_success:
-                self._write_success(private_key, wallet_address)
-                return True
+        self._write_failure(private_key, wallet_address)
+        return False
 
-        except Exception as e:
-            error_log(f'Processing error for account {account_number}: {str(e)}')
-            self._write_failure(private_key, wallet_address)
-            return False
-        finally:
-            session.close()
+    def retry_failed_accounts(self):
+        while self.retry_manager.should_continue_retrying():
+            retry_accounts = self.retry_manager.get_retry_accounts()
+            info_log(f"Retrying {len(retry_accounts)} accounts. Current success rate: "
+                    f"{self.retry_manager.get_success_rate()*100:.2f}%")
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.config['app']['threads']) as executor:
+                futures = []
+                for account_number, private_key, wallet_address in retry_accounts:
+                    sleep(self.retry_delay)
+                    future = executor.submit(
+                        self.process_account_with_retry,
+                        account_number,
+                        private_key,
+                        wallet_address,
+                        len(retry_accounts)
+                    )
+                    futures.append(future)
+
+                concurrent.futures.wait(futures)
+
+            success_rate = self.retry_manager.get_success_rate() * 100
+            info_log(f"Current success rate after retry: {success_rate:.2f}%")
 
     def _write_success(self, private_key, wallet_address):
         with self.lock:
