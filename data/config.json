@@ -1,6 +1,6 @@
 {
     "app": {
-        "threads": 5,
+        "threads": 10,
         "keys_file": "data/keys_and_addresses.txt",
         "proxy_file": "data/proxys.txt",
         "success_file": "logs/success_accounts.txt",
