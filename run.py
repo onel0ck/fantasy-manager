@@ -64,7 +64,7 @@ def main():
                     
                 private_key, wallet_address = account_data
                 future = executor.submit(
-                    processor.process_account,
+                    processor.process_account_with_retry,
                     account_number,
                     private_key,
                     wallet_address,
@@ -72,11 +72,12 @@ def main():
                 )
                 futures.append(future)
 
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    error_log(f"Error processing account: {str(e)}")
+            concurrent.futures.wait(futures)
+
+        processor.retry_failed_accounts()
+
+        final_success_rate = processor.retry_manager.get_success_rate() * 100
+        success_log(f"Final success rate: {final_success_rate:.2f}%")
 
     except KeyboardInterrupt:
         print(f"\n{Fore.RED}Script interrupted by user")
