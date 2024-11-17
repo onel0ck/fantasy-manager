@@ -51,12 +51,23 @@ class TokenManager:
 
         token = account_data.get('token')
         cookies = account_data.get('cookies')
+        last_claim = account_data.get('last_daily_claim')
 
         if not token or not cookies:
             return False, None, None
 
         if not self.validate_token(token) or not self.validate_cookies(cookies):
             return False, None, None
+
+        if last_claim:
+            try:
+                last_claim_time = datetime.fromisoformat(last_claim)
+                next_claim = last_claim_time + timedelta(hours=24)
+                if datetime.now(pytz.UTC) < next_claim:
+                    info_log(f"Account {wallet_address} cannot claim daily yet. Next claim at {next_claim}")
+                    return False, None, None
+            except ValueError:
+                return False, None, None
 
         return True, token, cookies
 
@@ -74,7 +85,7 @@ class TokenManager:
                 if success:
                     return True, token
             except Exception as e:
-                logging.error(f"Error testing stored credentials (attempt {attempt + 1}): {str(e)}")
+                rate_limit_log(f"Error testing stored credentials (attempt {attempt + 1}): {str(e)}")
                 sleep(1)
 
         return False, None
@@ -94,9 +105,32 @@ class TokenManager:
                 headers=headers,
                 proxies=self.api.proxies
             )
+            if response.status_code == 429:
+                rate_limit_log(f'Rate limit hit while testing token for account {account_number}')
+                return False
             return response.status_code == 200
-        except Exception:
+        except requests.exceptions.RequestException:
             return False
+
+    def update_credentials(self, wallet_address: str, token: str, cookies: dict):
+        account_data = self.account_storage.get_account_data(wallet_address)
+        if account_data:
+            self.account_storage.update_account(
+                wallet_address,
+                account_data["private_key"],
+                token=token,
+                cookies=cookies
+            )
+
+    def invalidate_credentials(self, wallet_address: str):
+        account_data = self.account_storage.get_account_data(wallet_address)
+        if account_data:
+            self.account_storage.update_account(
+                wallet_address,
+                account_data["private_key"],
+                token=None,
+                cookies=None
+            )
 
 class FantasyAPI:
     def __init__(self, web3_provider, session, proxies, config, user_agent, account_storage):
@@ -167,7 +201,7 @@ class FantasyAPI:
         return False
 
     def login(self, private_key, wallet_address, account_number):
-        max_retries = 3
+        max_retries = 5
         
         for attempt in range(max_retries):
             try:
@@ -194,10 +228,10 @@ class FantasyAPI:
                 )
 
                 if init_response.status_code == 429:
+                    info_log(f'Rate limit hit for account {account_number}')
                     if attempt < max_retries - 1:
                         sleep(2)
                         continue
-                    error_log(f'Rate limit hit for account {account_number}')
                     return False
 
                 if init_response.status_code != 200:
