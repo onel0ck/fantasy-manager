@@ -140,7 +140,6 @@ class FantasyProcessor:
                 info_log(f'Retrying account {account_number}: {wallet_address} (Attempt {current_attempt + 1}/{max_attempts})')
             
             try:
-                # Проверяем stored credentials только если ещё не было неудачных попыток с ними
                 if self.retry_manager.should_try_stored_credentials(account_data):
                     stored_success, stored_token = api.token_manager.try_stored_credentials(wallet_address, account_number)
                     if stored_success:
