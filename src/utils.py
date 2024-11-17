@@ -206,6 +206,12 @@ def ensure_directories():
     for directory in directories:
         os.makedirs(directory, exist_ok=True)
 
+def rate_limit_log(message: str):
+    current_time = get_current_time()
+    log_message = f">> RATE LIMIT | {current_time} | {message}"
+    print(Fore.LIGHTBLACK_EX + log_message)
+    write_to_log_file(log_message)
+
 def load_config():
     config_path = 'data/config.json'
     try:
