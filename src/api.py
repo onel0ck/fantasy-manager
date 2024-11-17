@@ -12,8 +12,7 @@ import math
 import jwt
 from typing import Dict, Optional, Tuple
 from colorama import Fore
-from .utils import error_log, success_log, info_log
-from .account_storage import AccountStorage
+from .utils import error_log, success_log, info_log, rate_limit_log
 
 class TokenManager:
     def __init__(self, account_storage, api_instance):
@@ -188,14 +187,30 @@ class FantasyAPI:
                     return True
                     
                 if attempt < max_retries - 1:
+                    info_log(f'Session initialization retry {attempt + 1}/{max_retries} - status codes: {response.status_code}, {maintenance_response.status_code}')
                     sleep(1)
                     continue
                     
-            except Exception as e:
+            except requests.exceptions.ReadTimeout:
                 if attempt < max_retries - 1:
+                    info_log(f'Session initialization timeout, retrying ({attempt + 1}/{max_retries})...')
                     sleep(1)
                     continue
-                error_log(f"Session initialization failed: {str(e)}")
+                info_log(f'Session initialization timeout after {max_retries} attempts - need proxy change')
+                return False
+            except requests.exceptions.ProxyError:
+                if attempt < max_retries - 1:
+                    info_log(f'Proxy connection error, retrying ({attempt + 1}/{max_retries})...')
+                    sleep(1)
+                    continue
+                info_log(f'Proxy connection failed after {max_retries} attempts - need proxy change')
+                return False
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    info_log(f'Session initialization error, retrying ({attempt + 1}/{max_retries}): {str(e)}')
+                    sleep(1)
+                    continue
+                info_log(f'Session initialization failed after {max_retries} attempts: {str(e)}')
                 return False
         
         return False
@@ -228,7 +243,7 @@ class FantasyAPI:
                 )
 
                 if init_response.status_code == 429:
-                    info_log(f'Rate limit hit for account {account_number}')
+                    rate_limit_log(f'Rate limit hit for account {account_number}')
                     if attempt < max_retries - 1:
                         sleep(2)
                         continue
@@ -259,10 +274,10 @@ class FantasyAPI:
                 )
 
                 if auth_response.status_code == 429:
+                    rate_limit_log(f'Rate limit hit for account {account_number}')
                     if attempt < max_retries - 1:
                         sleep(2)
                         continue
-                    error_log(f'Rate limit hit for account {account_number}')
                     return False
 
                 if auth_response.status_code != 200:
@@ -295,7 +310,7 @@ class FantasyAPI:
                 return False
 
         return False
-
+        
     def get_token(self, auth_data, wallet_address, account_number):
         try:
             headers = {
