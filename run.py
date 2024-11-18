@@ -10,13 +10,14 @@ from src.utils import (
     ensure_directories, 
     countdown_timer,
     read_user_agents,
-    error_log
+    error_log,
+    info_log
 )
 from src.main import FantasyProcessor
 
 def print_banner():
     banner = f"""
-{Fore.CYAN}██╗   ██╗███╗   ██╗██╗     ██╗   ██╗ ██████╗██╗  ██╗
+{Fore.CYAN}██╗   ██╗███╗   ██╗██╗     ╔███████╗ ██████╗██╗  ██╗
 {Fore.CYAN}██║   ██║████╗  ██║██║     ██║   ██║██╔════╝██║ ██╔╝
 {Fore.CYAN}██║   ██║██╔██╗ ██║██║     ██║   ██║██║     █████╔╝ 
 {Fore.CYAN}██║   ██║██║╚██╗██║██║     ██║   ██║██║     ██╔═██╗ 
@@ -28,12 +29,40 @@ def print_banner():
 {Fore.RESET}"""
     print(banner)
 
+def get_start_delay():
+    while True:
+        try:
+            delay = input(f"\n{Fore.YELLOW}Enter delay before start (in seconds): {Fore.RESET}")
+            seconds = int(delay)
+            if seconds < 0:
+                print(f"{Fore.RED}Please enter a positive number{Fore.RESET}")
+                continue
+            return seconds
+        except ValueError:
+            print(f"{Fore.RED}Please enter a valid number{Fore.RESET}")
+
+def start_countdown(seconds):
+    if seconds <= 0:
+        return
+        
+    print(f"\n{Fore.YELLOW}Starting in {seconds} seconds...")
+    
+    while seconds > 0:
+        print(f"\r{Fore.YELLOW}Time remaining: {seconds:02d}s", end="")
+        sleep(1)
+        seconds -= 1
+    
+    print(f"\n{Fore.GREEN}Starting now!{Fore.RESET}")
+
 def main():
     init()
     ensure_directories()
     print_banner()
     
     try:
+        delay_seconds = get_start_delay()
+        start_countdown(delay_seconds)
+        
         config = load_config()
         proxies_dict, all_proxies = read_proxies(config['app']['proxy_file'])
         user_agents_cycle = read_user_agents()
@@ -77,7 +106,7 @@ def main():
         processor.retry_failed_accounts()
 
         final_success_rate = processor.retry_manager.get_success_rate() * 100
-        success_log(f"Final success rate: {final_success_rate:.2f}%")
+        info_log(f"Final success rate: {final_success_rate:.2f}%")
 
     except KeyboardInterrupt:
         print(f"\n{Fore.RED}Script interrupted by user")
