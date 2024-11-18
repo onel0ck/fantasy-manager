@@ -1,6 +1,7 @@
 import math
 import random
 import time
+import os
 import threading
 import concurrent.futures
 from time import sleep
@@ -212,40 +213,54 @@ class FantasyProcessor:
         return False
 
     def retry_failed_accounts(self):
-        retry_count = 0
-        max_retries = 3
-        
-        while self.retry_manager.should_continue_retrying() and retry_count < max_retries:
+        while self.retry_manager.should_continue_retrying():
             retry_accounts = self.retry_manager.get_retry_accounts()
-            if not retry_accounts:
-                break
+            if retry_accounts:
+                info_log(f"Retrying {len(retry_accounts)} accounts from current session. Success rate: "
+                        f"{self.retry_manager.get_success_rate()*100:.2f}%")
                 
-            info_log(f"Retrying {len(retry_accounts)} accounts. Current success rate: "
-                    f"{self.retry_manager.get_success_rate()*100:.2f}%")
-            
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.config['app']['threads']) as executor:
-                futures = []
-                for account_number, private_key, wallet_address in retry_accounts:
-                    sleep(self.retry_delay)
-                    future = executor.submit(
-                        self.process_account_with_retry,
-                        account_number,
-                        private_key,
-                        wallet_address,
-                        len(retry_accounts)
-                    )
-                    futures.append(future)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=self.config['app']['threads']) as executor:
+                    futures = []
+                    for account_number, private_key, wallet_address in retry_accounts:
+                        sleep(self.retry_delay)
+                        future = executor.submit(
+                            self.process_account_with_retry,
+                            account_number,
+                            private_key,
+                            wallet_address,
+                            len(retry_accounts)
+                        )
+                        futures.append(future)
+                    concurrent.futures.wait(futures)
 
-                concurrent.futures.wait(futures)
-
-            success_rate = self.retry_manager.get_success_rate() * 100
-            info_log(f"Current success rate after retry attempt {retry_count + 1}: {success_rate:.2f}%")
-            retry_count += 1
-            
-            if retry_count < max_retries:
-                sleep_time = self.retry_delay * (retry_count + 1)
-                info_log(f"Waiting {sleep_time} seconds before next retry attempt...")
-                sleep(sleep_time)
+        try:
+            if os.path.exists(self.config['app']['failure_file']):
+                with open(self.config['app']['failure_file'], 'r') as f:
+                    failed_accounts = [line.strip().split(':') for line in f if line.strip()]
+                
+                if failed_accounts:
+                    info_log(f"Found {len(failed_accounts)} accounts in failure_accounts.txt. Starting processing...")
+                    
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=self.config['app']['threads']) as executor:
+                        futures = []
+                        for idx, (private_key, wallet_address) in enumerate(failed_accounts, 1):
+                            sleep(self.retry_delay)
+                            future = executor.submit(
+                                self.process_account_with_retry,
+                                idx,
+                                private_key,
+                                wallet_address,
+                                len(failed_accounts)
+                            )
+                            futures.append(future)
+                        concurrent.futures.wait(futures)
+                    
+                    success_rate = self.retry_manager.get_success_rate() * 100
+                    info_log(f"Final success rate for failure_accounts.txt: {success_rate:.2f}%")
+                else:
+                    info_log("No accounts found in failure_accounts.txt")
+        except Exception as e:
+            error_log(f"Error processing failure_accounts.txt: {str(e)}")
 
     def _write_success(self, private_key, wallet_address):
         with self.lock:
