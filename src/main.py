@@ -73,6 +73,7 @@ class FantasyProcessor:
         self.lock = threading.Lock()
         self.retry_manager = RetryManager()
         self.retry_delay = 5
+        self.max_proxy_retries = 5
 
     def _wait_rate_limit(self, thread_id):
         current_time = time.time()
@@ -99,16 +100,26 @@ class FantasyProcessor:
 
     def process_account_with_retry(self, account_number, private_key, wallet_address, total_accounts):
         account_data = (account_number, private_key, wallet_address)
+        proxy_retries = 0
         
-        try:
-            success = self.process_account(account_number, private_key, wallet_address, total_accounts)
-            if success:
-                self.retry_manager.add_success_account(account_data)
-            else:
+        while proxy_retries < self.max_proxy_retries:
+            try:
+                success = self.process_account(account_number, private_key, wallet_address, total_accounts)
+                if success:
+                    self.retry_manager.add_success_account(account_data)
+                    return
+                proxy_retries += 1
+                sleep(2)
+            except requests.exceptions.RequestException as e:
+                error_log(f"Network error for account {account_number}: {str(e)}")
+                proxy_retries += 1
+                sleep(2)
+            except Exception as e:
+                error_log(f"Error processing account {account_number}: {str(e)}")
                 self.retry_manager.add_failed_account(account_data)
-        except Exception as e:
-            error_log(f"Error processing account {account_number}: {str(e)}")
-            self.retry_manager.add_failed_account(account_data)
+                return
+
+        self.retry_manager.add_failed_account(account_data)
 
     def process_account(self, account_number, private_key, wallet_address, total_accounts):
         max_attempts = 7
@@ -168,27 +179,25 @@ class FantasyProcessor:
                         sleep(2)
                         continue
 
-                try:
-                    if self.config['daily']['enabled']:
-                        daily_result = api.daily_claim(token, wallet_address, account_number)
-                        if daily_result is True:
-                            self._write_success(private_key, wallet_address)
-                            self.retry_manager.add_success_account(account_data)
-                            session.close()
-                            return True
-                        else:
-                            current_attempt += 1
-                            self.retry_manager.add_failed_account(account_data)
-                            if not self.retry_manager.should_try_stored_credentials(account_data):
-                                self.retry_manager.mark_stored_credentials_failed(account_data)
-                                
-                except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError):
-                    current_attempt += 1
-                    self.retry_manager.add_failed_account(account_data)
-                    session.close()
-                    sleep(2)
-                    continue
+                if self.config['daily']['enabled']:
+                    daily_result = api.daily_claim(token, wallet_address, account_number)
+                    if daily_result is True:
+                        self._write_success(private_key, wallet_address)
+                        self.retry_manager.add_success_account(account_data)
+                        session.close()
+                        return True
+                    else:
+                        current_attempt += 1
+                        self.retry_manager.add_failed_account(account_data)
+                        if not self.retry_manager.should_try_stored_credentials(account_data):
+                            self.retry_manager.mark_stored_credentials_failed(account_data)
 
+            except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout):
+                current_attempt += 1
+                self.retry_manager.add_failed_account(account_data)
+                session.close()
+                sleep(3)
+                continue
             except Exception as e:
                 current_attempt += 1
                 self.retry_manager.add_failed_account(account_data)
@@ -196,13 +205,21 @@ class FantasyProcessor:
                 session.close()
                 sleep(2)
                 continue
+            finally:
+                session.close()
 
         self._write_failure(private_key, wallet_address)
         return False
 
     def retry_failed_accounts(self):
-        while self.retry_manager.should_continue_retrying():
+        retry_count = 0
+        max_retries = 3
+        
+        while self.retry_manager.should_continue_retrying() and retry_count < max_retries:
             retry_accounts = self.retry_manager.get_retry_accounts()
+            if not retry_accounts:
+                break
+                
             info_log(f"Retrying {len(retry_accounts)} accounts. Current success rate: "
                     f"{self.retry_manager.get_success_rate()*100:.2f}%")
             
@@ -222,7 +239,13 @@ class FantasyProcessor:
                 concurrent.futures.wait(futures)
 
             success_rate = self.retry_manager.get_success_rate() * 100
-            info_log(f"Current success rate after retry: {success_rate:.2f}%")
+            info_log(f"Current success rate after retry attempt {retry_count + 1}: {success_rate:.2f}%")
+            retry_count += 1
+            
+            if retry_count < max_retries:
+                sleep_time = self.retry_delay * (retry_count + 1)
+                info_log(f"Waiting {sleep_time} seconds before next retry attempt...")
+                sleep(sleep_time)
 
     def _write_success(self, private_key, wallet_address):
         with self.lock:
