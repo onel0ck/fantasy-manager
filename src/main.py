@@ -236,10 +236,22 @@ class FantasyProcessor:
         try:
             if os.path.exists(self.config['app']['failure_file']):
                 with open(self.config['app']['failure_file'], 'r') as f:
-                    failed_accounts = [line.strip().split(':') for line in f if line.strip()]
+                    failed_accounts = []
+                    seen_accounts = set()
+                    
+                    for line in f:
+                        if line.strip():
+                            try:
+                                private_key, wallet_address = line.strip().split(':')
+                                if wallet_address not in seen_accounts:
+                                    failed_accounts.append((private_key, wallet_address))
+                                    seen_accounts.add(wallet_address)
+                            except ValueError:
+                                error_log(f"Invalid line format in failure_accounts.txt: {line.strip()}")
+                                continue
                 
                 if failed_accounts:
-                    info_log(f"Found {len(failed_accounts)} accounts in failure_accounts.txt. Starting processing...")
+                    info_log(f"Processing {len(failed_accounts)} unique accounts from failure_accounts.txt...")
                     
                     with concurrent.futures.ThreadPoolExecutor(max_workers=self.config['app']['threads']) as executor:
                         futures = []
@@ -258,7 +270,10 @@ class FantasyProcessor:
                     success_rate = self.retry_manager.get_success_rate() * 100
                     info_log(f"Final success rate for failure_accounts.txt: {success_rate:.2f}%")
                 else:
-                    info_log("No accounts found in failure_accounts.txt")
+                    info_log("No valid accounts found in failure_accounts.txt")
+                    
+                open(self.config['app']['failure_file'], 'w').close()
+                
         except Exception as e:
             error_log(f"Error processing failure_accounts.txt: {str(e)}")
 
