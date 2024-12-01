@@ -17,10 +17,11 @@ class RetryManager:
         self.failed_accounts = set()
         self.success_accounts = set()
         self.attempt_counter = {}
-        self.failed_with_stored = set()
+        self.stored_credentials_failed = set()
         self.max_retries = max_retries
         self.success_threshold = success_threshold
         self.lock = threading.Lock()
+        self.processed_failures = set()
 
     def add_failed_account(self, account_data):
         with self.lock:
@@ -34,16 +35,17 @@ class RetryManager:
         with self.lock:
             if account_data in self.failed_accounts:
                 self.failed_accounts.remove(account_data)
-            if account_data in self.failed_with_stored:
-                self.failed_with_stored.remove(account_data)
+            if account_data in self.stored_credentials_failed:
+                self.stored_credentials_failed.remove(account_data)
             self.success_accounts.add(account_data)
+            self.processed_failures.add(account_data)
 
     def mark_stored_credentials_failed(self, account_data):
         with self.lock:
-            self.failed_with_stored.add(account_data)
+            self.stored_credentials_failed.add(account_data)
 
     def should_try_stored_credentials(self, account_data):
-        return account_data not in self.failed_with_stored
+        return account_data not in self.stored_credentials_failed
 
     def get_retry_accounts(self):
         with self.lock:
@@ -61,6 +63,11 @@ class RetryManager:
     def should_continue_retrying(self):
         return (self.get_success_rate() < self.success_threshold and 
                 bool(self.get_retry_accounts()))
+
+    def get_unprocessed_failures(self):
+        with self.lock:
+            return [acc for acc in self.failed_accounts 
+                   if acc not in self.processed_failures]
 
 class FantasyProcessor:
     def __init__(self, config, proxies_dict, all_proxies, user_agents_cycle):
@@ -152,6 +159,7 @@ class FantasyProcessor:
                 info_log(f'Retrying account {account_number}: {wallet_address} (Attempt {current_attempt + 1}/{max_attempts})')
             
             try:
+                success = False
                 if self.retry_manager.should_try_stored_credentials(account_data):
                     stored_success, stored_token = api.token_manager.try_stored_credentials(wallet_address, account_number)
                     if stored_success:
@@ -181,17 +189,26 @@ class FantasyProcessor:
                         continue
 
                 if self.config['daily']['enabled']:
-                    daily_result = api.daily_claim(token, wallet_address, account_number)
-                    if daily_result is True:
-                        self._write_success(private_key, wallet_address)
-                        self.retry_manager.add_success_account(account_data)
-                        session.close()
-                        return True
-                    else:
+                    success = api.daily_claim(token, wallet_address, account_number)
+                    if not success:
                         current_attempt += 1
                         self.retry_manager.add_failed_account(account_data)
                         if not self.retry_manager.should_try_stored_credentials(account_data):
                             self.retry_manager.mark_stored_credentials_failed(account_data)
+                        continue
+
+                if self.config['info_check']:
+                    info_success = api.info(token, wallet_address, account_number)
+                    if not info_success:
+                        current_attempt += 1
+                        self.retry_manager.add_failed_account(account_data)
+                        continue
+                    success = True
+
+                if success:
+                    self._write_success(private_key, wallet_address)
+                    self.retry_manager.add_success_account(account_data)
+                    return True
 
             except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout):
                 current_attempt += 1
