@@ -493,34 +493,26 @@ Resources:
                 data = response.json()
                 player_data = data.get('players_by_pk', {})
                 
-                fantasy_points = player_data.get('fantasy_points', 0)
-                stars = player_data.get('stars', 0)
-                is_onboarding_done = player_data.get('is_onboarding_done', False)
-                gold = player_data.get('gold', '0')
-                portfolio_value = player_data.get('portfolio_value', 0)
-                number_of_cards = player_data.get('number_of_cards', '0')
-                rewards = data.get('rewards', [])
+                result_line = (
+                    f"{wallet_address}:"
+                    f"stars={player_data.get('stars', 0)}:"
+                    f"gold={player_data.get('gold', '0')}:"
+                    f"portfolio_value={player_data.get('portfolio_value', 0)}:"
+                    f"number_of_cards={player_data.get('number_of_cards', '0')}:"
+                    f"fantasy_points={player_data.get('fantasy_points', 0)}"
+                )
 
-                result_line = (f"{wallet_address}:"
-                            f"stars={stars}:"
-                            f"is_onboarding_done={is_onboarding_done}:"
-                            f"gold={gold}:"
-                            f"portfolio_value={portfolio_value}:"
-                            f"number_of_cards={number_of_cards}:"
-                            f"rewards={'Yes' if rewards else 'No'}:"
-                            f"fantasy_points={fantasy_points}")
-
-                with open(self.config['app']['result_file'], 'a') as f:
+                with open(self.config['app']['result_file'], 'a', encoding='utf-8') as f:
                     f.write(result_line + '\n')
 
                 success_log(f"Info collected for account {account_number}: {wallet_address}")
                 return True
 
-            error_log(f'Error getting info for account {account_number}: {wallet_address} | Status Code: {response.status_code}')
+            error_log(f'Error getting info for account {account_number}: {response.status_code}')
             return False
 
         except Exception as e:
-            error_log(f"Error in info function for account {account_number}: {wallet_address}: {str(e)}")
+            error_log(f"Error in info function for account {account_number}: {str(e)}")
             return False
 
     def get_headers(self, token=None):
