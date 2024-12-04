@@ -153,23 +153,18 @@ class FantasyProcessor:
                 account_storage=self.account_storage
             )
             
-            if current_attempt == 0:
-                info_log(f'Processing account {account_number}: {wallet_address}')
-            else:
-                info_log(f'Retrying account {account_number}: {wallet_address} (Attempt {current_attempt + 1}/{max_attempts})')
-            
             try:
-                success = False
-                if self.retry_manager.should_try_stored_credentials(account_data):
+                auth_data = None
+                token = None
+                
+                if current_attempt == 0:
+                    info_log(f'Processing account {account_number}: {wallet_address}')
                     stored_success, stored_token = api.token_manager.try_stored_credentials(wallet_address, account_number)
                     if stored_success:
                         info_log(f'Using stored credentials for account {account_number}')
                         token = stored_token
-                    else:
-                        self.retry_manager.mark_stored_credentials_failed(account_data)
-                        token = None
                 else:
-                    token = None
+                    info_log(f'Retrying account {account_number}: {wallet_address} (Attempt {current_attempt + 1}/{max_attempts})')
 
                 if not token:
                     auth_data = api.login(private_key, wallet_address, account_number)
@@ -190,25 +185,30 @@ class FantasyProcessor:
 
                 if self.config['daily']['enabled']:
                     success = api.daily_claim(token, wallet_address, account_number)
-                    if not success:
-                        current_attempt += 1
-                        self.retry_manager.add_failed_account(account_data)
-                        if not self.retry_manager.should_try_stored_credentials(account_data):
-                            self.retry_manager.mark_stored_credentials_failed(account_data)
-                        continue
+                    if success:
+                        self._write_success(private_key, wallet_address)
+                        self.retry_manager.add_success_account(account_data)
+                        session.close()
+                        return True
+                    
+                    current_attempt += 1
+                    self.retry_manager.add_failed_account(account_data)
+                    sleep(2)
+                    continue
 
-                if self.config['info_check']:
-                    info_success = api.info(token, wallet_address, account_number)
-                    if not info_success:
-                        current_attempt += 1
-                        self.retry_manager.add_failed_account(account_data)
-                        continue
-                    success = True
-
-                if success:
-                    self._write_success(private_key, wallet_address)
-                    self.retry_manager.add_success_account(account_data)
-                    return True
+                if self.config['tactic']['enabled']:
+                    old_account_flag = self.config['tactic']['old_account']
+                    success = api.tactic_claim(token, wallet_address, account_number, total_accounts, old_account_flag)
+                    if success:
+                        self._write_success(private_key, wallet_address)
+                        self.retry_manager.add_success_account(account_data)
+                        session.close()
+                        return True
+                    
+                    current_attempt += 1
+                    self.retry_manager.add_failed_account(account_data)
+                    sleep(2)
+                    continue
 
             except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout):
                 current_attempt += 1
