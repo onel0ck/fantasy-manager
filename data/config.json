@@ -1,13 +1,12 @@
 {
     "app": {
-        "threads": 10,
+        "threads": 1,
         "keys_file": "data/keys_and_addresses.txt",
         "proxy_file": "data/proxys.txt",
         "success_file": "logs/success_accounts.txt",
         "failure_file": "logs/failure_accounts.txt",
         "result_file": "logs/result.txt",
         "log_file": "logs/app.log",
-        "old_account": false,
         "min_balance": 0.01,
         "max_balance_checks": 30,
         "balance_check_delay": 3
@@ -16,10 +15,11 @@
         "url": "https://blastl2-mainnet.public.blastapi.io"
     },
     "tactic": {
-        "enabled": false,
-        "id": "your_id",
+        "enabled": true,
+        "id": "03c7d6e9-e3e8-4739-a8ef-bbdbb39d3528",
         "max_toggle_attempts": 15,
         "delay_between_attempts": 5,
+        "old_account": true,
         "decks": [
             [7, 6, 5, 3, 2],
             [7, 6, 5, 3, 2],
@@ -41,7 +41,7 @@
         ]
     },
     "daily": {
-        "enabled": true
+        "enabled": false
     },
     "info_check": false
 }
