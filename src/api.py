@@ -19,6 +19,8 @@ class TokenManager:
         self.account_storage = account_storage
         self.api = api_instance
         self.max_retries = 2
+        self.rate_limit_delay = 3
+        self.stored_credentials_failed = set()
 
     def validate_token(self, token: str) -> bool:
         try:
@@ -50,14 +52,17 @@ class TokenManager:
 
         token = account_data.get('token')
         cookies = account_data.get('cookies')
-        last_claim = account_data.get('last_daily_claim')
 
         if not token or not cookies:
             return False, None, None
 
-        if not self.validate_token(token) or not self.validate_cookies(cookies):
+        if not self.validate_token(token):
             return False, None, None
 
+        if wallet_address in self.stored_credentials_failed:
+            return False, None, None
+
+        last_claim = account_data.get('last_daily_claim')
         if last_claim:
             try:
                 last_claim_time = datetime.fromisoformat(last_claim)
@@ -70,25 +75,6 @@ class TokenManager:
 
         return True, token, cookies
 
-    def try_stored_credentials(self, wallet_address: str, account_number: int) -> Tuple[bool, Optional[str]]:
-        is_valid, token, cookies = self.check_stored_credentials(wallet_address)
-        if not is_valid:
-            return False, None
-
-        for cookie_name, cookie_value in cookies.items():
-            self.api.session.cookies.set(cookie_name, cookie_value)
-
-        for attempt in range(self.max_retries):
-            try:
-                success = self._test_token(token, wallet_address, account_number)
-                if success:
-                    return True, token
-            except Exception as e:
-                rate_limit_log(f"Error testing stored credentials (attempt {attempt + 1}): {str(e)}")
-                sleep(1)
-
-        return False, None
-
     def _test_token(self, token: str, wallet_address: str, account_number: int) -> bool:
         headers = {
             'Accept': 'application/json, text/plain, */*',
@@ -97,29 +83,57 @@ class TokenManager:
             'Referer': 'https://fantasy.top/',
         }
         
-        try:
-            response = self.api.session.get(
-                'https://fantasy.top/api/get-player-basic-data',
-                params={"playerId": wallet_address},
-                headers=headers,
-                proxies=self.api.proxies
-            )
-            if response.status_code == 429:
-                rate_limit_log(f'Rate limit hit while testing token for account {account_number}')
-                return False
-            return response.status_code == 200
-        except requests.exceptions.RequestException:
-            return False
+        for attempt in range(2):
+            try:
+                response = self.api.session.get(
+                    'https://fantasy.top/api/get-player-basic-data',
+                    params={"playerId": wallet_address},
+                    headers=headers,
+                    proxies=self.api.proxies,
+                    timeout=10
+                )
+                
+                if response.status_code == 429:
+                    rate_limit_log(f'Rate limit hit while testing token for account {account_number}')
+                    sleep(self.rate_limit_delay)
+                    continue
+                    
+                return response.status_code == 200
+                
+            except requests.exceptions.RequestException:
+                sleep(1)
+                continue
+                
+        return False
+
+    def try_stored_credentials(self, wallet_address: str, account_number: int) -> Tuple[bool, Optional[str]]:
+        is_valid, token, cookies = self.check_stored_credentials(wallet_address)
+        if not is_valid:
+            return False, None
+
+        if cookies:
+            for cookie_name, cookie_value in cookies.items():
+                self.api.session.cookies.set(cookie_name, cookie_value)
+
+        token_valid = self._test_token(token, wallet_address, account_number)
+        if not token_valid:
+            return False, None
+            
+        return True, token
+
+    def mark_stored_credentials_failed(self, wallet_address: str):
+        self.stored_credentials_failed.add(wallet_address)
+
+    def should_try_stored_credentials(self, wallet_address: str) -> bool:
+        return wallet_address not in self.stored_credentials_failed
 
     def update_credentials(self, wallet_address: str, token: str, cookies: dict):
-        account_data = self.account_storage.get_account_data(wallet_address)
-        if account_data:
-            self.account_storage.update_account(
-                wallet_address,
-                account_data["private_key"],
-                token=token,
-                cookies=cookies
-            )
+        self.account_storage.update_account(
+            wallet_address,
+            self.account_storage.get_account_data(wallet_address)["private_key"],
+            token=token,
+            cookies=cookies
+        )
 
     def invalidate_credentials(self, wallet_address: str):
         account_data = self.account_storage.get_account_data(wallet_address)
@@ -226,7 +240,6 @@ class FantasyAPI:
                         continue
                     return False
 
-                init_payload = {'address': wallet_address}
                 init_headers = {
                     'Accept': 'application/json',
                     'Content-Type': 'application/json',
@@ -234,6 +247,8 @@ class FantasyAPI:
                     'Privy-Client': 'react-auth:1.92.8',
                     'Privy-Ca-Id': '315a64ce-afe9-4e58-87ea-3abd2d9a9484'
                 }
+                
+                init_payload = {'address': wallet_address}
                 
                 init_response = self.session.post(
                     'https://privy.fantasy.top/api/v1/siwe/init', 
@@ -285,22 +300,44 @@ class FantasyAPI:
                     return False
 
                 auth_data = auth_response.json()
-                cookies_dict = {cookie.name: cookie.value for cookie in self.session.cookies}
                 
                 if 'token' in auth_data:
                     self.session.cookies.set('privy-token', auth_data['token'])
-                if 'privy_access_token' in auth_data:
-                    self.session.cookies.set('privy-access-token', auth_data['privy_access_token'])
+                if auth_data.get('identity_token'):
+                    self.session.cookies.set('privy-id-token', auth_data['identity_token'])
+                
+                final_auth_headers = {
+                    'Accept': 'application/json, text/plain, */*',
+                    'Content-Type': 'application/json',
+                    'Origin': self.base_url,
+                    'Referer': f'{self.base_url}/onboarding/home'
+                }
+                
+                final_auth_payload = {"address": wallet_address}
+                
+                final_auth_response = self.session.post(
+                    f'{self.base_url}/api/auth/privy',
+                    json=final_auth_payload,
+                    headers=final_auth_headers,
+                    proxies=self.proxies
+                )
+                
+                if final_auth_response.status_code != 200:
+                    error_log(f'Final auth failed for account {account_number}: {final_auth_response.status_code}')
+                    return False
+
+                final_auth_data = final_auth_response.json()
+                cookies_dict = {cookie.name: cookie.value for cookie in self.session.cookies}
 
                 self.account_storage.update_account(
                     wallet_address,
                     private_key,
-                    token=auth_data.get('token'),
+                    token=final_auth_data.get('token'),
                     cookies=cookies_dict
                 )
                 
                 info_log(f'Authentication successful for account {account_number}: {wallet_address}')
-                return auth_data
+                return final_auth_data
 
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -531,14 +568,94 @@ Resources:
         required_cookies = ['privy-token', 'privy-session', 'privy-access-token']
         return all(cookie in self.session.cookies for cookie in required_cookies)
 
+    def check_eth_balance(self, address):
+        try:
+            balance_wei = self.web3.eth.get_balance(address)
+            balance_eth = float(self.web3.from_wei(balance_wei, 'ether'))
+            return balance_eth
+        except Exception as e:
+            error_log(f'Error checking balance for {address}: {str(e)}')
+            return 0
+
+    def toggle_free_tactics(self, token, wallet_address, account_number):
+        headers = {
+            'Accept': 'application/json, text/plain, */*',
+            'Authorization': f'Bearer {token}',
+            'Origin': self.base_url,
+            'Referer': f'{self.base_url}/',
+            'User-Agent': self.user_agent
+        }
+
+        max_attempts = 15
+        delay_between_attempts = 5
+
+        for attempt in range(max_attempts):
+            try:
+                info_log(f'Toggle attempt {attempt + 1}/{max_attempts} for account {account_number}')
+                response = self.session.post(
+                    'https://api-v2.fantasy.top/tactics/toggle-can-play-free-tactics', 
+                    headers=headers, 
+                    proxies=self.proxies
+                )
+                
+                if response.status_code == 201:
+                    data = response.json()
+                    if data.get('can_play_free_tactics', False):
+                        success_log(f'Got TRUE status for account {account_number}: {wallet_address}')
+                        return True
+                    else:
+                        info_log(f'Attempt {attempt + 1}: Status still FALSE for account {account_number}')
+                        sleep(delay_between_attempts)
+                else:
+                    error_log(f'Toggle request failed: {response.status_code}')
+                    sleep(delay_between_attempts)
+
+            except Exception as e:
+                error_log(f'Toggle attempt {attempt + 1} error: {str(e)}')
+                sleep(delay_between_attempts)
+
+        return False
+
+    def wait_for_balance(self, address, required_balance, max_attempts=30):
+        for attempt in range(max_attempts):
+            current_balance = self.check_eth_balance(address)
+            info_log(f'Balance check attempt {attempt + 1}/{max_attempts} for {address}: {current_balance} ETH')
+            
+            if current_balance >= required_balance:
+                success_log(f'Required balance reached for {address}: {current_balance} ETH')
+                return True
+                
+            info_log(f'Waiting for balance... Current: {current_balance} ETH, Required: {required_balance} ETH')
+            sleep(3)
+        
+        error_log(f'Balance never reached required amount for {address}')
+        return False
+
     def transfer_eth(self, from_private_key, from_address, to_address):
         try:
             balance_wei = self.web3.eth.get_balance(from_address)
             balance_eth = float(self.web3.from_wei(balance_wei, 'ether'))
             
-            initial_gas_reserve = 0.000001
+            test_transaction = {
+                'nonce': self.web3.eth.get_transaction_count(from_address),
+                'to': self.web3.to_checksum_address(to_address),
+                'value': self.web3.to_wei(0.0000000001, 'ether'),
+                'gas': 21000,
+                'maxFeePerGas': self.web3.eth.gas_price * 2,
+                'maxPriorityFeePerGas': self.web3.to_wei(0.000000001, 'gwei'),
+                'type': 2,
+                'chainId': 81457
+            }
+
+            gas_estimate = self.web3.eth.estimate_gas(test_transaction)
+            gas_price = test_transaction['maxFeePerGas']
+            gas_cost_wei = gas_estimate * gas_price
+            gas_cost_eth = float(self.web3.from_wei(gas_cost_wei, 'ether'))
             
+            initial_gas_reserve = 0.000002
             transfer_amount = balance_eth - initial_gas_reserve
+
+            info_log(f'Gas estimation: cost={gas_cost_eth} ETH, reserve={initial_gas_reserve} ETH')
             
             if transfer_amount <= 0:
                 error_log(f'Insufficient balance for transfer from {from_address}')
@@ -548,41 +665,102 @@ Resources:
                 error_log(f'Transfer amount too small: {transfer_amount} ETH')
                 return False
 
-            try:
-                transaction = {
-                    'nonce': self.web3.eth.get_transaction_count(from_address),
-                    'to': self.web3.to_checksum_address(to_address),
-                    'value': self.web3.to_wei(transfer_amount, 'ether'),
-                    'gas': 21000,
-                    'maxFeePerGas': self.web3.eth.gas_price * 2,
-                    'maxPriorityFeePerGas': self.web3.to_wei(0.000000001, 'gwei'),
-                    'type': 2,
-                    'chainId': 81457
-                }
+            transaction = {
+                'nonce': self.web3.eth.get_transaction_count(from_address),
+                'to': self.web3.to_checksum_address(to_address),
+                'value': self.web3.to_wei(transfer_amount, 'ether'),
+                'gas': 21000,
+                'maxFeePerGas': gas_price,
+                'maxPriorityFeePerGas': self.web3.to_wei(0.00000002, 'gwei'),
+                'type': 2,
+                'chainId': 81457
+            }
 
-                signed_txn = self.web3.eth.account.sign_transaction(transaction, from_private_key)
-                tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
-                
-                success_log(f'Sending {transfer_amount} ETH from {from_address} to {to_address}')
-                success_log(f'TX Hash: {tx_hash.hex()}')
-                
-                receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
-                return receipt['status'] == 1
-
-            except Exception as e:
-                error_log(f'Transfer error: {str(e)}')
+            signed_txn = self.web3.eth.account.sign_transaction(transaction, from_private_key)
+            tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+            
+            success_log(f'Sending {transfer_amount} ETH from {from_address} to {to_address}')
+            success_log(f'TX Hash: {tx_hash.hex()}')
+            
+            receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
+            if receipt['status'] == 1:
+                success_log(f'Transfer confirmed: {tx_hash.hex()}')
+                if self.wait_for_balance(to_address, self.config['app']['min_balance']):
+                    return True
+                else:
+                    error_log(f'Transfer confirmed but balance not updated for {to_address}')
+                    return False
+            else:
+                error_log(f'Transfer failed: {tx_hash.hex()}')
                 return False
 
         except Exception as e:
-            error_log(f'Critical error in transfer_eth: {str(e)}')
+            info_log(f'Error during transfer: {str(e)}')
+            try:
+                initial_gas_reserve = initial_gas_reserve * 2
+                transfer_amount = balance_eth - initial_gas_reserve
+                info_log(f'Retrying with increased gas reserve: {initial_gas_reserve} ETH')
+                
+                transaction['value'] = self.web3.to_wei(transfer_amount, 'ether')
+                signed_txn = self.web3.eth.account.sign_transaction(transaction, from_private_key)
+                tx_hash = self.web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+                
+                receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
+                if receipt['status'] == 1:
+                    success_log(f'Transfer successful on second attempt: {tx_hash.hex()}')
+                    return True
+            except Exception as retry_error:
+                info_log(f'Retry also failed: {str(retry_error)}')
             return False
 
-    def tactic_claim(self, token, wallet_address, account_number, total_accounts):
-        private_key = self.account_storage.get_account_data(wallet_address)["private_key"]
-        
+    def _get_deck_for_account(self, account_number: int, total_accounts: int):
+        accounts_per_deck = math.ceil(total_accounts / len(self.config['tactic']['decks']))
+        deck_index = min((account_number - 1) // accounts_per_deck, len(self.config['tactic']['decks']) - 1)
+        return self.config['tactic']['decks'][deck_index]
+
+    def _select_card_by_stars(self, stars: int, deck: list, used_cards: list):
+        for card in deck:
+            if isinstance(card, dict) and 'hero' in card and 'stars' in card['hero']:
+                if card['hero']['stars'] == stars and card not in used_cards:
+                    used_cards.append(card)
+                    return card
+        return None
+
+    def tactic_claim(self, token, wallet_address, account_number, total_accounts, old_account_flag):
         try:
+            if old_account_flag:
+                private_key = self.account_storage.get_account_data(wallet_address)["private_key"]
+                balance = self.check_eth_balance(wallet_address)
+                if balance < self.config['app']['min_balance']:
+                    info_log(f'Insufficient balance ({balance} ETH) for account {account_number}: {wallet_address}')
+                    
+                    prev_account = account_number - 1 if account_number > 1 else 1
+                    with open(self.config['app']['keys_file'], 'r') as f:
+                        lines = f.readlines()
+                        if prev_account <= len(lines):
+                            prev_private_key, prev_address = lines[prev_account - 1].strip().split(':')
+                            prev_balance = self.check_eth_balance(prev_address)
+                            
+                            if prev_balance >= self.config['app']['min_balance']:
+                                success = self.transfer_eth(prev_private_key, prev_address, wallet_address)
+                                if success:
+                                    if not self.wait_for_balance(wallet_address, self.config['app']['min_balance']):
+                                        info_log(f'Failed to reach required balance for account {account_number}')
+                                        return False
+                                else:
+                                    info_log(f'Failed to transfer from account {prev_account} to {account_number}')
+                                    return False
+                            else:
+                                info_log(f'Previous account {prev_account} has insufficient balance: {prev_balance} ETH')
+                                return False
+
+                if not self.toggle_free_tactics(token, wallet_address, account_number):
+                    info_log(f'Failed to get TRUE status for account {account_number}')
+                    return False
+
             headers = {
-                'Accept': '*/*',
+                'Accept': 'application/json, text/plain, */*',
+                'Content-Type': 'application/json',
                 'Authorization': f'Bearer {token}',
                 'Origin': self.base_url,
                 'Referer': f'{self.base_url}/play/tactics'
@@ -592,11 +770,14 @@ Resources:
                 f'{self.base_url}/api/tactics/register',
                 json={"tacticId": self.config['tactic']['id']},
                 headers=headers,
-                proxies=self.proxies
+                proxies=self.proxies,
+                timeout=15
             )
 
             if register_response.status_code == 400:
-                success_log(f'DECK REGISTER {account_number}')
+                success_log(f'Already registered in tactic {account_number}')
+                if old_account_flag:
+                    self._make_transfer_to_next(account_number, total_accounts, wallet_address, private_key)
                 return True
 
             if register_response.status_code == 401:
@@ -605,9 +786,10 @@ Resources:
                     new_token = self.get_token(auth_data, wallet_address, account_number)
                     if new_token:
                         return self.tactic_claim(new_token, wallet_address, account_number, total_accounts)
+                return False
 
             if register_response.status_code != 200:
-                error_log(f'Error registering tactic for account {account_number}')
+                info_log(f'Error registering tactic for account {account_number}: {register_response.text}')
                 return False
 
             tactic_id = register_response.json().get('id')
@@ -620,12 +802,12 @@ Resources:
             )
                 
             if deck_response.status_code != 200:
-                error_log(f'Failed to get deck choices: {deck_response.status_code}')
+                info_log(f'Failed to get deck choices: {deck_response.status_code}')
                 return False
 
             deck = deck_response.json()
             if not isinstance(deck, dict) or 'hero_choices' not in deck:
-                error_log('Invalid deck response format')
+                info_log('Invalid deck response format')
                 return False
 
             cards = deck['hero_choices']
@@ -647,11 +829,11 @@ Resources:
                         hero_choices.append(card)
                         total_stars += card['hero_score']['stars']
                     else:
-                        error_log(f'Error selecting alternative card with {stars} stars for account {account_number}')
+                        info_log(f'Error selecting card with {stars} stars for account {account_number}')
                         return False
 
             if len(hero_choices) != len(stars_to_select) or total_stars > 24:
-                error_log(f'Invalid card selection for account {account_number}. Total stars: {total_stars}')
+                info_log(f'Invalid card selection for account {account_number}. Total stars: {total_stars}')
                 return False
 
             hero_choices_json = json.dumps(hero_choices)
@@ -669,27 +851,26 @@ Resources:
 
             if deck_upload_response.status_code == 200:
                 success_log(f'Deck saved for account {account_number}')
+                if old_account_flag:
+                    self._make_transfer_to_next(account_number, total_accounts, wallet_address, private_key)
                 return True
             
-            error_log(f'Save error {account_number}. Status: {deck_upload_response.status_code}')
+            info_log(f'Save error {account_number}. Status: {deck_upload_response.status_code}')
             return False
 
         except Exception as e:
-            error_log(f'Tactic claim error for account {account_number}: {str(e)}')
+            if "tactic_id" not in str(e):
+                error_log(f'Tactic claim error for account {account_number}: {str(e)}')
             return False
 
-    def _get_deck_for_account(self, account_number, total_accounts):
-        accounts_per_deck = math.ceil(total_accounts / len(self.config['tactic']['decks']))
-        deck_index = min((account_number - 1) // accounts_per_deck, len(self.config['tactic']['decks']) - 1)
-        return self.config['tactic']['decks'][deck_index]
-
-    def _select_card_by_stars(self, stars, deck, used_cards):
-        for card in deck:
-            if isinstance(card, dict) and 'hero' in card and 'stars' in card['hero']:
-                if card['hero']['stars'] == stars and card not in used_cards:
-                    used_cards.append(card)
-                    return card
-        return None
+    def _make_transfer_to_next(self, account_number: int, total_accounts: int, wallet_address: str, private_key: str):
+        next_account = (account_number % total_accounts) + 1
+        with open(self.config['app']['keys_file'], 'r') as f:
+            for i, line in enumerate(f.readlines(), 1):
+                if i == next_account and line.strip():
+                    _, target_address = line.strip().split(':')
+                    self.transfer_eth(private_key, wallet_address, target_address)
+                    break
 
     def _get_alternative_card(self, deck, used_cards, max_stars):
         for card in deck:
