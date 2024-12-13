@@ -674,7 +674,7 @@ Resources:
                 'value': self.web3.to_wei(0.0000000001, 'ether'),
                 'gas': 21000,
                 'maxFeePerGas': self.web3.eth.gas_price * 2,
-                'maxPriorityFeePerGas': self.web3.to_wei(0.000000001, 'gwei'),
+                'maxPriorityFeePerGas': self.web3.to_wei(0.00000002, 'gwei'),
                 'type': 2,
                 'chainId': 81457
             }
