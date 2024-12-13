@@ -156,6 +156,7 @@ class FantasyProcessor:
             try:
                 auth_data = None
                 token = None
+                success = True
                 
                 if current_attempt == 0:
                     info_log(f'Processing account {account_number}: {wallet_address}')
@@ -169,56 +170,65 @@ class FantasyProcessor:
                 if not token:
                     auth_data = api.login(private_key, wallet_address, account_number)
                     if not auth_data:
-                        current_attempt += 1
-                        self.retry_manager.add_failed_account(account_data)
-                        session.close()
-                        sleep(2)
-                        continue
+                        success = False
+                    else:
+                        token = api.get_token(auth_data, wallet_address, account_number)
+                        if not token:
+                            success = False
 
-                    token = api.get_token(auth_data, wallet_address, account_number)
-                    if not token:
-                        current_attempt += 1
-                        self.retry_manager.add_failed_account(account_data)
-                        session.close()
-                        sleep(2)
-                        continue
-
-                if self.config['daily']['enabled']:
-                    success = api.daily_claim(token, wallet_address, account_number)
-                    if success:
-                        self._write_success(private_key, wallet_address)
-                        self.retry_manager.add_success_account(account_data)
-                        session.close()
-                        return True
-                    
+                if not success:
                     current_attempt += 1
                     self.retry_manager.add_failed_account(account_data)
+                    if current_attempt >= max_attempts:
+                        self._write_failure(private_key, wallet_address)
+                    session.close()
                     sleep(2)
                     continue
 
-                if self.config['tactic']['enabled']:
+                if self.config['info_check']:
+                    if not api.info(token, wallet_address, account_number):
+                        success = False
+
+                if success and self.config.get('fragments', {}).get('enabled', False):
+                    fragment_id = self.config['fragments']['id']
+                    if not api.fragments_claim(token, wallet_address, account_number, fragment_id):
+                        success = False
+
+                if success and self.config['daily']['enabled']:
+                    if not api.daily_claim(token, wallet_address, account_number):
+                        success = False
+
+                if success and self.config['tactic']['enabled']:
                     old_account_flag = self.config['tactic']['old_account']
-                    success = api.tactic_claim(token, wallet_address, account_number, total_accounts, old_account_flag)
-                    if success:
-                        self._write_success(private_key, wallet_address)
-                        self.retry_manager.add_success_account(account_data)
-                        session.close()
-                        return True
-                    
+                    if not api.tactic_claim(token, wallet_address, account_number, total_accounts, old_account_flag):
+                        success = False
+
+                if success:
+                    self._write_success(private_key, wallet_address)
+                    self.retry_manager.add_success_account(account_data)
+                    session.close()
+                    return True
+                else:
                     current_attempt += 1
                     self.retry_manager.add_failed_account(account_data)
+                    if current_attempt >= max_attempts:
+                        self._write_failure(private_key, wallet_address)
                     sleep(2)
                     continue
 
             except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout):
                 current_attempt += 1
                 self.retry_manager.add_failed_account(account_data)
+                if current_attempt >= max_attempts:
+                    self._write_failure(private_key, wallet_address)
                 session.close()
                 sleep(3)
                 continue
             except Exception as e:
                 current_attempt += 1
                 self.retry_manager.add_failed_account(account_data)
+                if current_attempt >= max_attempts:
+                    self._write_failure(private_key, wallet_address)
                 error_log(f'Processing error for account {account_number}: {str(e)}')
                 session.close()
                 sleep(2)
