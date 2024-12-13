@@ -233,10 +233,20 @@ def read_proxies(proxy_file):
     return proxies_dict, all_proxies
 
 def read_accounts(file_path):
+    unique_accounts = {}
     with open(file_path, 'r') as f:
-        return [(i, line.strip().split(':')) 
-                for i, line in enumerate(f.readlines(), 1) 
-                if line.strip()]
+        for line in f:
+            if line.strip():
+                try:
+                    private_key, wallet_address = line.strip().split(':')
+                    if wallet_address not in unique_accounts:
+                        unique_accounts[wallet_address] = private_key
+                except ValueError:
+                    continue
+                    
+    return [(i, (private_key, address)) 
+            for i, (address, private_key) 
+            in enumerate(unique_accounts.items(), 1)]
 
 def countdown_timer(seconds):
     for i in range(seconds, 0, -1):
