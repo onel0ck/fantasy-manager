@@ -177,14 +177,14 @@ class FantasyAPI:
                 response = self.session.get(
                     'https://fantasy.top/cdn-cgi/rum',
                     proxies=self.proxies,
-                    timeout=10
+                    timeout=2
                 )
                 self.session.cookies.update(response.cookies)
 
                 response = self.session.get(
                     'https://auth.privy.io/api/v1/apps/clra3wyj700lslb0frokrj261',
                     proxies=self.proxies,
-                    timeout=10
+                    timeout=2
                 )
                 self.session.cookies.update(response.cookies)
 
@@ -260,7 +260,6 @@ class FantasyAPI:
                 if init_response.status_code == 429:
                     rate_limit_log(f'Rate limit hit for account {account_number}')
                     if attempt < max_retries - 1:
-                        sleep(2)
                         continue
                     return False
 
@@ -291,7 +290,6 @@ class FantasyAPI:
                 if auth_response.status_code == 429:
                     rate_limit_log(f'Rate limit hit for account {account_number}')
                     if attempt < max_retries - 1:
-                        sleep(2)
                         continue
                     return False
 
@@ -800,6 +798,7 @@ Resources:
                 'Referer': f'{self.base_url}/play/tactics'
             }
 
+
             register_payload = {"tactic_id": self.config['tactic']['id']}
             register_response = self.session.post(
                 f'{self.api_url}/tactics/register',
@@ -814,6 +813,16 @@ Resources:
                 if old_account_flag:
                     self._make_transfer_to_next(account_number, total_accounts, wallet_address, private_key)
                 return True
+
+            try:
+                response_data = register_response.json()
+                if "id" in response_data:
+                    success_log(f'Successfully registered in tactic {account_number} with ID: {response_data["id"]}')
+                    if old_account_flag:
+                        self._make_transfer_to_next(account_number, total_accounts, wallet_address, private_key)
+                    return True
+            except:
+                pass
 
             if register_response.status_code != 200:
                 info_log(f'Error registering tactic for account {account_number}: {register_response.text}')
