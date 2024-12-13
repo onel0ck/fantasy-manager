@@ -507,14 +507,22 @@ Resources:
             error_log(f'Quest claim error for account {account_number}: {str(e)}')
             return False
 
-    def info(self, token, wallet_address, account_number):
+    def fragments_claim(self, token, wallet_address, account_number, fragment_id):
         try:
-            headers = self.get_headers(token)
-            response = self.session.get(
-                f'{self.base_url}/api/get-player-basic-data',
-                params={"playerId": wallet_address},
+            headers = {
+                'Accept': 'application/json, text/plain, */*',
+                'Authorization': f'Bearer {token}',
+                'Origin': self.base_url,
+                'Referer': f'{self.base_url}/',
+                'Content-Length': '0'
+            }
+
+            response = self.session.post(
+                f'{self.api_url}/quest/onboarding/complete/{fragment_id}',
                 headers=headers,
-                proxies=self.proxies
+                data="",
+                proxies=self.proxies,
+                timeout=10
             )
 
             if response.status_code == 401:
@@ -524,19 +532,45 @@ Resources:
                     if auth_data:
                         new_token = self.get_token(auth_data, wallet_address, account_number)
                         if new_token:
-                            return self.info(new_token, wallet_address, account_number)
+                            return self.fragments_claim(new_token, wallet_address, account_number, fragment_id)
+
+            if response.status_code == 201:
+                success_log(f'Successfully claimed fragment {fragment_id} for account {account_number}: {wallet_address}')
+                return True
+
+            error_log(f'Fragment claim failed for account {account_number}: {response.status_code}')
+            return False
+
+        except Exception as e:
+            error_log(f'Fragment claim error for account {account_number}: {str(e)}')
+            return False
+
+    def info(self, token, wallet_address, account_number):
+        try:
+            headers = {
+                'Accept': 'application/json, text/plain, */*',
+                'Referer': f'{self.base_url}/',
+                'User-Agent': self.user_agent,
+                'sec-ch-ua-platform': '"Windows"',
+                'sec-ch-ua-mobile': '?0'
+            }
+
+            response = self.session.get(
+                f'{self.api_url}/player/basic-data/{wallet_address}',
+                headers=headers,
+                proxies=self.proxies
+            )
 
             if response.status_code == 200:
                 data = response.json()
-                player_data = data.get('players_by_pk', {})
                 
                 result_line = (
                     f"{wallet_address}:"
-                    f"stars={player_data.get('stars', 0)}:"
-                    f"gold={player_data.get('gold', '0')}:"
-                    f"portfolio_value={player_data.get('portfolio_value', 0)}:"
-                    f"number_of_cards={player_data.get('number_of_cards', '0')}:"
-                    f"fantasy_points={player_data.get('fantasy_points', 0)}"
+                    f"stars={data.get('stars', 0)}:"
+                    f"gold={data.get('gold', '0')}:"
+                    f"portfolio_value={data.get('portfolio_value', 0)}:"
+                    f"number_of_cards={data.get('number_of_cards', '0')}:"
+                    f"fantasy_points={data.get('fantasy_points', 0)}"
                 )
 
                 with open(self.config['app']['result_file'], 'a', encoding='utf-8') as f:
@@ -766,9 +800,10 @@ Resources:
                 'Referer': f'{self.base_url}/play/tactics'
             }
 
+            register_payload = {"tactic_id": self.config['tactic']['id']}
             register_response = self.session.post(
-                f'{self.base_url}/api/tactics/register',
-                json={"tacticId": self.config['tactic']['id']},
+                f'{self.api_url}/tactics/register',
+                json=register_payload,
                 headers=headers,
                 proxies=self.proxies,
                 timeout=15
@@ -780,27 +815,19 @@ Resources:
                     self._make_transfer_to_next(account_number, total_accounts, wallet_address, private_key)
                 return True
 
-            if register_response.status_code == 401:
-                auth_data = self.login(private_key, wallet_address, account_number)
-                if auth_data:
-                    new_token = self.get_token(auth_data, wallet_address, account_number)
-                    if new_token:
-                        return self.tactic_claim(new_token, wallet_address, account_number, total_accounts)
-                return False
-
             if register_response.status_code != 200:
                 info_log(f'Error registering tactic for account {account_number}: {register_response.text}')
                 return False
 
-            tactic_id = register_response.json().get('id')
-            info_log(f'Register: {account_number}: ID tactic {tactic_id}')
+            entry_id = register_response.json().get('id')
+            info_log(f'Register: {account_number}: ID tactic {entry_id}')
 
             deck_response = self.session.get(
-                f'{self.api_url}/tactics/entry/{tactic_id}/choices',
+                f'{self.api_url}/tactics/entry/{entry_id}/choices',
                 headers=self.get_headers(token),
                 proxies=self.proxies
             )
-                
+                    
             if deck_response.status_code != 200:
                 info_log(f'Failed to get deck choices: {deck_response.status_code}')
                 return False
@@ -836,30 +863,29 @@ Resources:
                 info_log(f'Invalid card selection for account {account_number}. Total stars: {total_stars}')
                 return False
 
-            hero_choices_json = json.dumps(hero_choices)
-            payload_card = {
-                "tacticPlayerId": tactic_id,
-                "heroChoices": hero_choices_json
+            save_payload = {
+                "tacticPlayerId": entry_id,
+                "heroChoices": hero_choices
             }
 
-            deck_upload_response = self.session.post(
-                f'{self.base_url}/api/tactics/deck/save',
-                json=payload_card,
+            save_response = self.session.post(
+                f'{self.api_url}/tactics/save-deck',
+                json=save_payload,
                 headers=headers,
                 proxies=self.proxies
             )
 
-            if deck_upload_response.status_code == 200:
+            if save_response.status_code == 200:
                 success_log(f'Deck saved for account {account_number}')
                 if old_account_flag:
                     self._make_transfer_to_next(account_number, total_accounts, wallet_address, private_key)
                 return True
-            
-            info_log(f'Save error {account_number}. Status: {deck_upload_response.status_code}')
+                
+            info_log(f'Save error {account_number}. Status: {save_response.status_code}')
             return False
 
         except Exception as e:
-            if "tactic_id" not in str(e):
+            if "entry_id" not in str(e):
                 error_log(f'Tactic claim error for account {account_number}: {str(e)}')
             return False
 
