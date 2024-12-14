@@ -219,7 +219,7 @@ class FantasyAPI:
                     if attempt < max_retries - 1:
                         proxy = random.choice(self.all_proxies)
                         self.proxies = {"http": proxy, "https": proxy}
-                        error_log(f'Switching proxy for account {account_number} to: {proxy}')
+                        info_log(f'Switching proxy for account {account_number} to: {proxy}')
                         sleep(retry_delay)
                         continue
                     error_log(f'Authentication failed for account {account_number}: {auth_response.status_code}')
