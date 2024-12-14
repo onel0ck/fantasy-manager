@@ -272,7 +272,7 @@ class FantasyAPI:
                 return final_auth_data
 
             except Exception as e:
-                error_log(f'Login error for account {account_number}: {str(e)}')
+                info_log(f'Login error for account {account_number}: {str(e)}')
                 if attempt < max_retries - 1:
                     proxy = random.choice(self.all_proxies)
                     self.proxies = {"http": proxy, "https": proxy}
