@@ -97,15 +97,6 @@ class FantasyProcessor:
         with self.lock:
             return random.choice(self.all_proxies)
 
-    def _try_with_different_proxy(self, account_number):
-        new_proxy = self._get_random_proxy()
-        info_log(f'Switching proxy for account {account_number} to: {new_proxy}')
-        proxy_dict = {
-            "http": new_proxy,
-            "https": new_proxy
-        }
-        return proxy_dict
-
     def process_account_with_retry(self, account_number, private_key, wallet_address, total_accounts):
         account_data = (account_number, private_key, wallet_address)
         proxy_retries = 0
@@ -142,7 +133,9 @@ class FantasyProcessor:
             api = None
             
             try:
-                proxy_dict = self._try_with_different_proxy(account_number)
+                proxy = self._get_random_proxy()
+                proxy_dict = {"http": proxy, "https": proxy}
+                info_log(f'Switching proxy for account {account_number} to: {proxy}')
                 
                 with self.lock:
                     user_agent = next(self.user_agents_cycle)
@@ -151,6 +144,7 @@ class FantasyProcessor:
                     web3_provider=self.config['rpc']['url'],
                     session=session,
                     proxies=proxy_dict,
+                    all_proxies=self.all_proxies,
                     config=self.config,
                     user_agent=user_agent,
                     account_storage=self.account_storage
@@ -288,13 +282,16 @@ class FantasyProcessor:
                         prev_private_key, prev_address = lines[prev_account - 1].strip().split(':')
                         if api is None:
                             session = requests.Session()
-                            proxy_dict = self._try_with_different_proxy(account_number)
+                            proxy = self._get_random_proxy()
+                            proxy_dict = {"http": proxy, "https": proxy}
+                            info_log(f'Switching proxy for account {account_number} to: {proxy}')
                             with self.lock:
                                 user_agent = next(self.user_agents_cycle)
                             api = FantasyAPI(
                                 web3_provider=self.config['rpc']['url'],
                                 session=session,
                                 proxies=proxy_dict,
+                                all_proxies=self.all_proxies,
                                 config=self.config,
                                 user_agent=user_agent,
                                 account_storage=self.account_storage
