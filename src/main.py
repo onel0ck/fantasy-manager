@@ -22,22 +22,50 @@ class RetryManager:
         self.success_threshold = success_threshold
         self.lock = threading.Lock()
         self.processed_failures = set()
+        self.final_failures = set()
 
     def add_failed_account(self, account_data):
         with self.lock:
-            self.failed_accounts.add(account_data)
-            if account_data not in self.attempt_counter:
-                self.attempt_counter[account_data] = 1
-            else:
-                self.attempt_counter[account_data] += 1
+            if account_data not in self.success_accounts:
+                self.failed_accounts.add(account_data)
+                if account_data not in self.attempt_counter:
+                    self.attempt_counter[account_data] = 1
+                else:
+                    self.attempt_counter[account_data] += 1
+                
+                if self.attempt_counter[account_data] >= self.max_retries:
+                    if account_data not in self.final_failures:
+                        self.final_failures.add(account_data)
+                        self._write_to_fail_file(account_data)
+
+    def _write_to_fail_file(self, account_data):
+        try:
+            _, private_key, wallet_address = account_data
+            fail_file_path = "logs/failure_accounts.txt"
+            
+            existing_entries = set()
+            if os.path.exists(fail_file_path):
+                with open(fail_file_path, "r") as f:
+                    existing_entries = set(f.readlines())
+            
+            new_entry = f"{private_key}:{wallet_address}\n"
+            
+            if new_entry not in existing_entries:
+                with open(fail_file_path, "a") as f:
+                    f.write(new_entry)
+                
+        except Exception as e:
+            error_log(f"Error writing to fail file: {str(e)}")
 
     def add_success_account(self, account_data):
         with self.lock:
+            self.success_accounts.add(account_data)
             if account_data in self.failed_accounts:
                 self.failed_accounts.remove(account_data)
+            if account_data in self.final_failures:
+                self.final_failures.remove(account_data)
             if account_data in self.stored_credentials_failed:
                 self.stored_credentials_failed.remove(account_data)
-            self.success_accounts.add(account_data)
             self.processed_failures.add(account_data)
 
     def mark_stored_credentials_failed(self, account_data):
@@ -50,7 +78,8 @@ class RetryManager:
     def get_retry_accounts(self):
         with self.lock:
             return [acc for acc in self.failed_accounts 
-                   if self.attempt_counter[acc] < self.max_retries]
+                   if self.attempt_counter[acc] < self.max_retries 
+                   and acc not in self.final_failures]
 
     def get_current_attempt(self, account_data):
         with self.lock:
@@ -126,185 +155,127 @@ class FantasyProcessor:
         current_attempt = self.retry_manager.get_current_attempt(account_data)
         
         while current_attempt < max_attempts:
-            thread_id = threading.get_ident()
-            self._wait_rate_limit(thread_id)
-            
-            session = requests.Session()
-            api = None
-            
             try:
-                proxy = self._get_random_proxy()
-                proxy_dict = {"http": proxy, "https": proxy}
-                info_log(f'Switching proxy for account {account_number} to: {proxy}')
+                thread_id = threading.get_ident()
+                self._wait_rate_limit(thread_id)
                 
-                with self.lock:
-                    user_agent = next(self.user_agents_cycle)
+                session = requests.Session()
+                api = None
                 
-                api = FantasyAPI(
-                    web3_provider=self.config['rpc']['url'],
-                    session=session,
-                    proxies=proxy_dict,
-                    all_proxies=self.all_proxies,
-                    config=self.config,
-                    user_agent=user_agent,
-                    account_storage=self.account_storage
-                )
-                
-                auth_data = None
-                token = None
-                
-                if current_attempt == 0:
-                    info_log(f'Processing account {account_number}: {wallet_address}')
-                    stored_success, stored_token = api.token_manager.try_stored_credentials(wallet_address, account_number)
-                    if stored_success:
-                        info_log(f'Using stored credentials for account {account_number}')
-                        token = stored_token
-                else:
-                    info_log(f'Retrying account {account_number}: {wallet_address} (Attempt {current_attempt + 1}/{max_attempts})')
+                try:
+                    proxy = self._get_random_proxy()
+                    proxy_dict = {"http": proxy, "https": proxy}
+                    
+                    if current_attempt == 0:
+                        info_log(f'Processing account {account_number}: {wallet_address}')
+                    else:
+                        info_log(f'Retrying account {account_number}: {wallet_address} (Attempt {current_attempt + 1}/{max_attempts})')
+                    
+                    with self.lock:
+                        user_agent = next(self.user_agents_cycle)
+                    
+                    api = FantasyAPI(
+                        web3_provider=self.config['rpc']['url'],
+                        session=session,
+                        proxies=proxy_dict,
+                        all_proxies=self.all_proxies,
+                        config=self.config,
+                        user_agent=user_agent,
+                        account_storage=self.account_storage
+                    )
 
-                if not token:
-                    auth_data = api.login(private_key, wallet_address, account_number)
-                    if not auth_data:
-                        current_attempt += 1
-                        self.retry_manager.add_failed_account(account_data)
-                        session.close()
-                        sleep(2)
-                        continue
+                    auth_data = None
+                    token = None
+                    
+                    if current_attempt == 0:
+                        stored_success, stored_token = api.token_manager.try_stored_credentials(wallet_address, account_number)
+                        if stored_success:
+                            info_log(f'Using stored credentials for account {account_number}')
+                            token = stored_token
 
-                    token = api.get_token(auth_data, wallet_address, account_number)
                     if not token:
-                        current_attempt += 1
-                        self.retry_manager.add_failed_account(account_data)
-                        session.close()
-                        sleep(2)
-                        continue
-
-                is_tactic_enabled = self.config['tactic']['enabled']
-                old_account_flag = is_tactic_enabled and self.config['tactic'].get('old_account', False)
-                
-                if old_account_flag:
-                    balance = api.check_eth_balance(wallet_address)
-                    if balance < self.config['app']['min_balance']:
-                        info_log(f'Insufficient balance ({balance} ETH) for account {account_number}: {wallet_address}')
-                        
-                        prev_account = account_number - 1 if account_number > 1 else 1
-                        try:
-                            with open(self.config['app']['keys_file'], 'r') as f:
-                                lines = f.readlines()
-                                if prev_account <= len(lines):
-                                    prev_private_key, prev_address = lines[prev_account - 1].strip().split(':')
-                                    prev_balance = api.check_eth_balance(prev_address)
-                                    
-                                    if prev_balance >= self.config['app']['min_balance']:
-                                        success = api.transfer_eth(prev_private_key, prev_address, wallet_address)
-                                        if not success or not api.wait_for_balance(wallet_address, self.config['app']['min_balance']):
-                                            info_log(f'Failed to transfer or reach required balance for account {account_number}')
-                                            current_attempt += 1
-                                            continue
-                                    else:
-                                        info_log(f'Previous account {prev_account} has insufficient balance: {prev_balance} ETH')
-                                        if current_attempt >= max_attempts - 1:
-                                            api.transfer_eth(prev_private_key, prev_address, wallet_address)
-                                        current_attempt += 1
-                                        continue
-                        except Exception as e:
-                            error_log(f'Error handling balance transfer: {str(e)}')
+                        auth_data = api.login(private_key, wallet_address, account_number)
+                        if not auth_data:
+                            if "429" in str(auth_data):
+                                info_log(f'Rate limit on login for account {account_number}, switching proxy...')
+                                current_attempt += 1
+                                session.close()
+                                sleep(2)
+                                continue
+                            
                             current_attempt += 1
+                            session.close()
+                            sleep(2)
                             continue
 
-                if self.config['info_check']:
-                    info_success = api.info(token, wallet_address, account_number)
-                    if not info_success:
+                        token = api.get_token(auth_data, wallet_address, account_number)
+                        if not token:
+                            current_attempt += 1
+                            session.close()
+                            sleep(2)
+                            continue
+
+                    tasks_completed = True
+
+                    if self.config['quest']['enabled']:
+                        for quest_id in self.config['quest']['ids']:
+                            quest_success = api.quest_claim(token, wallet_address, account_number, quest_id)
+                            if not quest_success:
+                                if "429" in str(quest_success):
+                                    info_log(f'Rate limit on quest claim for account {account_number}, retrying...')
+                                    sleep(2)
+                                    continue
+                                tasks_completed = False
+                                break
+
+                    if self.config['info_check']:
+                        info_success = api.info(token, wallet_address, account_number)
+                        if not info_success:
+                            if "429" in str(info_success):
+                                info_log(f'Rate limit on info check for account {account_number}, retrying...')
+                                current_attempt += 1
+                                sleep(2)
+                                continue
+                            tasks_completed = False
+
+                    if tasks_completed:
+                        self._write_success(private_key, wallet_address)
+                        self.retry_manager.add_success_account(account_data)
+                        session.close()
+                        return True
+                    else:
                         current_attempt += 1
-                        self.retry_manager.add_failed_account(account_data)
                         session.close()
                         sleep(2)
                         continue
 
-                if self.config.get('fragments', {}).get('enabled', False):
-                    fragment_id = self.config['fragments']['id']
-                    fragment_success = api.fragments_claim(token, wallet_address, account_number, fragment_id)
-                    if not fragment_success:
+                except requests.exceptions.RequestException as e:
+                    if "429" in str(e):
+                        info_log(f'Rate limit exception for account {account_number}, retrying...')
                         current_attempt += 1
-                        self.retry_manager.add_failed_account(account_data)
-                        session.close()
                         sleep(2)
                         continue
-
-                if self.config['daily']['enabled']:
-                    daily_success = api.daily_claim(token, wallet_address, account_number)
-                    if not daily_success:
-                        current_attempt += 1
-                        self.retry_manager.add_failed_account(account_data)
+                    error_log(f'Request error for account {account_number}: {str(e)}')
+                    current_attempt += 1
+                    session.close()
+                    sleep(2)
+                    continue
+                    
+                finally:
+                    if session:
                         session.close()
-                        sleep(2)
-                        continue
 
-                if is_tactic_enabled:
-                    tactic_success = api.tactic_claim(token, wallet_address, account_number, total_accounts, old_account_flag)
-                    if not tactic_success:
-                        current_attempt += 1
-                        self.retry_manager.add_failed_account(account_data)
-                        session.close()
-                        sleep(2)
-                        continue
-
-                self._write_success(private_key, wallet_address)
-                self.retry_manager.add_success_account(account_data)
-                session.close()
-                return True
-
-            except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout):
-                current_attempt += 1
-                self.retry_manager.add_failed_account(account_data)
-                session.close()
-                sleep(3)
-                continue
-                
             except Exception as e:
+                error_log(f"Error processing account {account_number}: {str(e)}")
                 current_attempt += 1
-                self.retry_manager.add_failed_account(account_data)
-                error_log(f'Processing error for account {account_number}: {str(e)}')
-                session.close()
                 sleep(2)
                 continue
-                
-            finally:
-                if session:
-                    session.close()
 
-        if self.config['tactic']['enabled'] and self.config['tactic'].get('old_account', False):
-            try:
-                prev_account = account_number - 1 if account_number > 1 else 1
-                with open(self.config['app']['keys_file'], 'r') as f:
-                    lines = f.readlines()
-                    if prev_account <= len(lines):
-                        prev_private_key, prev_address = lines[prev_account - 1].strip().split(':')
-                        if api is None:
-                            session = requests.Session()
-                            proxy = self._get_random_proxy()
-                            proxy_dict = {"http": proxy, "https": proxy}
-                            info_log(f'Switching proxy for account {account_number} to: {proxy}')
-                            with self.lock:
-                                user_agent = next(self.user_agents_cycle)
-                            api = FantasyAPI(
-                                web3_provider=self.config['rpc']['url'],
-                                session=session,
-                                proxies=proxy_dict,
-                                all_proxies=self.all_proxies,
-                                config=self.config,
-                                user_agent=user_agent,
-                                account_storage=self.account_storage
-                            )
-                        api.transfer_eth(prev_private_key, prev_address, wallet_address)
-            except Exception as e:
-                error_log(f'Final transfer attempt failed for account {account_number}: {str(e)}')
-            finally:
-                if session:
-                    session.close()
-
+        error_log(f'All attempts exhausted for account {account_number}')
         self._write_failure(private_key, wallet_address)
+        self.retry_manager.add_failed_account(account_data)
         return False
+
 
     def retry_failed_accounts(self):
         while self.retry_manager.should_continue_retrying():
@@ -375,13 +346,23 @@ class FantasyProcessor:
             try:
                 with open(self.config['app']['success_file'], 'a') as f:
                     f.write(f'{private_key}:{wallet_address}\n')
+                info_log(f'Successfully wrote {wallet_address} to success file')
             except Exception as e:
                 error_log(f'Error writing to success file: {str(e)}')
 
     def _write_failure(self, private_key, wallet_address):
         with self.lock:
             try:
-                with open(self.config['app']['failure_file'], 'a') as f:
-                    f.write(f'{private_key}:{wallet_address}\n')
+                existing_entries = set()
+                if os.path.exists(self.config['app']['failure_file']):
+                    with open(self.config['app']['failure_file'], 'r') as f:
+                        existing_entries = {line.strip() for line in f}
+
+                new_entry = f"{private_key}:{wallet_address}"
+                
+                if new_entry not in existing_entries:
+                    with open(self.config['app']['failure_file'], 'a') as f:
+                        f.write(f'{new_entry}\n')
+                    info_log(f'Wrote {wallet_address} to failure file')
             except Exception as e:
                 error_log(f'Error writing to failure file: {str(e)}')
