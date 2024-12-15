@@ -1,228 +1,174 @@
-# Fantasy-Manager
-Advanced automation tool for Fantasy.top daily claims, tactics, and interactions.
+# Fantasy Manager
+Advanced automation tool for Fantasy.top featuring quest claims, tactics participation, and account information gathering.
 
-**Telegram:** [1LOCK](https://t.me/unluck_1l0ck)  
-**X:** https://x.com/1l0ck
+**Telegram:** [@unluck_1l0ck](https://t.me/unluck_1l0ck)
 
 ## Features
-- Multi-account support with parallel processing
-- Static proxy support with account binding
-- Automatic proxy rotation on errors
-- Smart token management system
-- Daily claims automation with cooldown tracking
-- Tactics mode with deck building automation
-- Fragments claiming functionality
-- Automatic balance transfers between accounts
-- Smart balance management for gas fees
+- Multi-threaded account processing
+- Quest automation system
+- Tactics mode with customizable decks
+- Fragment collection
+- Proxy system with automatic rotation
 - Detailed logging system
-- Rate limit protection with proxy switching
+- Rate limit protection
+- Account information gathering
 
-## Important Setup Notes
+## Installation
 
-### Account Data Storage System
-The script maintains account data in `data/accounts_data.json`:
-- Bearer tokens and session data
-- Cookies and authentication information
-- Last claim timestamps and next claim times
-- Account creation dates
-
-Example account data structure:
-```json
-{
-    "0xWALLET_ADDRESS": {
-        "private_key": "PRIVATE_KEY",
-        "created_at": "2024-11-12T10:00:00.000000Z",
-        "token": "BEARER_TOKEN",
-        "token_updated_at": "2024-11-12T10:00:00.000000Z",
-        "cookies": {
-            "privy-token": "COOKIE_VALUE",
-            "privy-session": "COOKIE_VALUE",
-            "privy-access-token": "COOKIE_VALUE"
-        },
-        "cookies_updated_at": "2024-11-12T10:00:00.000000Z",
-        "last_daily_claim": "2024-11-12T10:00:00.000000Z",
-        "next_daily_claim": "2024-11-13T10:00:00.000000Z"
-    }
-}
-```
-
-### Smart Proxy Management
-- Each account has its dedicated static proxy
-- Automatic proxy rotation on rate limits or errors
-- Proxy validation and error handling
-- Random proxy selection from pool for retries
-
-### Configuration Example
-```json
-{
-    "app": {
-        "threads": 5,
-        "keys_file": "data/keys_and_addresses.txt",
-        "proxy_file": "data/proxys.txt",
-        "success_file": "logs/success_accounts.txt",
-        "failure_file": "logs/failure_accounts.txt",
-        "result_file": "logs/result.txt",
-        "log_file": "logs/app.log",
-        "min_balance": 0.01,
-        "max_balance_checks": 30,
-        "balance_check_delay": 3
-    },
-    "rpc": {
-        "url": "https://blastl2-mainnet.public.blastapi.io"
-    },
-    "tactic": {
-        "enabled": false,
-        "id": "your-tactic-id",
-        "max_toggle_attempts": 15,
-        "delay_between_attempts": 5,
-        "old_account": false,
-        "decks": [
-            [7, 6, 5, 3, 2],
-            [7, 6, 5, 3, 2],
-            [6, 6, 5, 4, 2]
-        ]
-    },
-    "fragments": {
-        "enabled": false,
-        "id": "your-fragment-id"
-    },
-    "daily": {
-        "enabled": true
-    },
-    "info_check": false
-}
-```
-
-## Setup Process
-1. Clone repository:
+1. Clone the repository:
 ```bash
-git clone https://github.com/onel0ck/fantasy-manager.git
+git clone https://github.com/yourusername/fantasy-manager.git
 cd fantasy-manager
 ```
 
 2. Create virtual environment:
 ```bash
 python -m venv venv
-venv\Scripts\activate
+venv\Scripts\activate  # Windows
+source venv/bin/activate  # Linux/Mac
+```
+
+3. Install dependencies:
+```bash
 pip install -r requirements.txt
 ```
 
-3. Configure files:
-- `data/config.json`: Your settings
-- `data/keys_and_addresses.txt`: Account credentials
-- `data/proxys.txt`: Proxy list
+## Configuration
 
-### Account Format (keys_and_addresses.txt)
+### Project Structure
 ```
-private_key1:address1
-private_key2:address2
-```
-
-### Proxy Format (proxys.txt)
-Each line corresponds to the account with the same line number:
-```
-http://login:password@ip:port
-http://login:password@ip:port
+fantasy-manager/
+├── data/
+│   ├── config.json             # Main configuration
+│   ├── keys_and_addresses.txt  # Private keys
+│   └── proxys.txt             # Proxy list
+└── logs/
+    ├── app.log                # Operation logs
+    ├── success_accounts.txt   # Successful accounts
+    ├── failure_accounts.txt   # Failed accounts
+    └── result.txt            # Account information
 ```
 
-## Operation Modes
-
-### Daily Claims
-Basic mode for claiming daily rewards:
+### Configuration (config.json)
 ```json
-"daily": {
-    "enabled": true
+{
+    "app": {
+        "threads": 10,                        // Number of parallel threads
+        "keys_file": "data/keys_and_addresses.txt",  // Private keys file
+        "proxy_file": "data/proxys.txt",     // Proxy file
+        "success_file": "logs/success_accounts.txt",
+        "failure_file": "logs/failure_accounts.txt",
+        "result_file": "logs/result.txt",
+        "log_file": "logs/app.log",
+        "min_balance": 0.01,                 // Minimum balance requirement
+        "max_balance_checks": 30,            // Maximum balance check attempts
+        "balance_check_delay": 3             // Delay between balance checks
+    },
+    "rpc": {
+        "url": "https://blastl2-mainnet.public.blastapi.io"
+    },
+    "tactic": {
+        "enabled": false,                    // Enable/disable tactics mode
+        "id": "29d389d3-5b76-4d4e-9d2d-86c7d0f681d5",  // Tactic ID
+        "max_toggle_attempts": 15,           // Maximum attempts to toggle status
+        "delay_between_attempts": 2,         // Delay between attempts
+        "old_account": false,               // Use old account mode
+        "decks": [                          // Deck configurations
+            [7, 6, 5, 3, 2],               // Each array represents a deck
+            [7, 6, 5, 3, 2],               // Numbers are hero star ratings
+            [6, 6, 5, 4, 2],
+            [7, 6, 5, 3, 2],
+            [7, 6, 6, 2, 2],
+            [6, 6, 5, 4, 2],
+            [6, 5, 5, 5, 2],
+            [6, 6, 5, 3, 3],
+            [7, 6, 4, 3, 3],
+            [6, 5, 5, 3, 3]
+        ]
+    },
+    "quest": {
+        "enabled": true,                     // Enable quests
+        "ids": [                            // Quest IDs
+            "ea7c4f8a-0db8-4a9d-a840-5f76cfb1fad5",
+            "ba57e629-9aee-4a2b-a02c-14713725f941"
+        ]
+    },
+    "daily": {
+        "enabled": false                     // Daily rewards
+    },
+    "fragments": {
+        "enabled": false,                    // Fragment collection
+        "id": "69e67d0a-0a08-4085-889f-58df15bdecb8"  // Fragment ID
+    },
+    "info_check": true                      // Gather account information
 }
 ```
+
+### File Formats
+
+#### keys_and_addresses.txt:
+```
+private_key1:wallet_address1
+private_key2:wallet_address2
+```
+
+#### proxys.txt:
+```
+http://login:pass@ip:port
+http://login:pass@ip:port
+```
+
+## Operating Modes
+
+### Quest Mode
+Automatically claims quests. Currently configured for:
+- Quest 1: ea7c4f8a-0db8-4a9d-a840-5f76cfb1fad5
+- Quest 2: ba57e629-9aee-4a2b-a02c-14713725f941
 
 ### Tactics Mode
-Automated deck building and participation:
-```json
-"tactic": {
-    "enabled": true,
-    "id": "tactic-id",
-    "old_account": true  // Enable balance transfers
-}
-```
+When enabled, participates in tactic ID: 29d389d3-5b76-4d4e-9d2d-86c7d0f681d5
+Features 10 different deck configurations for optimal performance.
 
-### Fragments Claiming
-Automatic fragment collection:
-```json
-"fragments": {
-    "enabled": true,
-    "id": "fragment-id"
-}
-```
+### Fragments Mode
+When enabled, collects fragment ID: 69e67d0a-0a08-4085-889f-58df15bdecb8
 
-### Info Collection
-Gather account statistics:
-```json
-"info_check": true
-```
-
-## Operation Flow
-1. Account and proxy binding
-2. Smart authentication with retry system
-3. Balance verification and transfers (if enabled)
-4. Execute enabled operations in sequence:
-   - Info collection (if enabled)
-   - Fragment claiming (if enabled)
-   - Daily claims (if enabled)
-   - Tactics participation (if enabled)
-5. Handle failures with proxy rotation
-6. Track success and failures
-7. Automatic balance management
-
-## Advanced Features
-
-### Tactics Mode
-- Automatic deck building based on configuration
-- Smart hero selection by star rating
-- Automatic balance transfer between accounts
-- FREE tactic status management
-- Support for multiple deck configurations
-- Automatic star calculation and validation
-
-### Fragments System
-- Automatic fragment claiming
-- Success tracking and retry logic
-- Multiple fragment ID support
-- Failure handling and retries
-
-### Balance Management
-- Automatic balance transfer from previous account
-- Smart gas fee estimation and management
-- Balance monitoring and validation
-- Minimum balance requirements handling
-- Transfer confirmation tracking
-- Gas optimization for transfers
-
-### Retry System
-- Smart retry logic with proxy rotation
-- Rate limit handling
-- Progressive delay between attempts
-- Success rate tracking
-- Proxy health monitoring
-
-## Logs
-Generated log files:
-- `app.log`: Detailed operation logs
-- `success_accounts.txt`: Successful accounts
-- `failure_accounts.txt`: Failed accounts
-- `result.txt`: Account information
-- `accounts_data.json`: Session and claim data
+### Information Collection
+When enabled, gathers and stores account data including:
+- Gold balance
+- Stars count
+- Portfolio value
+- Number of cards
+- Fantasy points
+- Rewards status
 
 ## Usage
-Run the script:
+
+1. Configure config.json according to your needs
+2. Add private keys to keys_and_addresses.txt
+3. Add proxies to proxys.txt
+4. Run the script:
 ```bash
 python run.py
 ```
 
-## License
-See [LICENSE](LICENSE) file for rights and limitations.
+## Logging System
+- `app.log` - Detailed operation logs
+- `success_accounts.txt` - Successfully processed accounts
+- `failure_accounts.txt` - Failed accounts
+- `result.txt` - Account information (gold, stars, rewards, etc.)
 
 ## Support
 Telegram: [@unluck_1l0ck](https://t.me/unluck_1l0ck)
 
 ## Disclaimer
-Educational purposes only. Use according to Fantasy.top's terms of service.
+This tool is for educational purposes only.
+
+---
+
+# requirements.txt
+web3==6.11.1
+requests==2.31.0
+colorama==0.4.6
+PyJWT==2.8.0
+python-dateutil==2.8.2
+pytz==2023.3
