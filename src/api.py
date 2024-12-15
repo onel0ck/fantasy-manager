@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from dateutil import parser
 import pytz
 import math
+import os
 import jwt
 from typing import Dict, Optional, Tuple
 from colorama import Fore
@@ -193,7 +194,7 @@ class FantasyAPI:
                         info_log(f'Switching proxy for account {account_number} to: {proxy}')
                         sleep(retry_delay)
                         continue
-                    error_log(f'SIWE init failed for account {account_number}: Status {init_response.status_code}')
+                    info_log(f'SIWE init failed for account {account_number}: Status {init_response.status_code}')
                     return False
 
                 nonce_data = init_response.json()
@@ -399,16 +400,14 @@ Resources:
         )
 
     def quest_claim(self, token, wallet_address, account_number, quest_id):
-        private_key = self.account_storage.get_account_data(wallet_address)["private_key"]
-        
         try:
             headers = {
-                'Accept': '*/*',
-                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept': 'application/json, text/plain, */*',
                 'Authorization': f'Bearer {token}',
                 'Content-Type': 'application/json',
                 'Origin': self.base_url,
-                'Referer': f'{self.base_url}/rewards'
+                'Referer': f'{self.base_url}/',
+                'User-Agent': self.user_agent
             }
 
             payload = {
@@ -423,18 +422,24 @@ Resources:
                 proxies=self.proxies
             )
 
-            if response.status_code == 401:
-                auth_data = self.login(private_key, wallet_address, account_number)
-                if auth_data:
-                    new_token = self.get_token(auth_data, wallet_address, account_number)
-                    if new_token:
-                        return self.quest_claim(new_token, wallet_address, account_number, quest_id)
-
-            if response.status_code == 201:
+            if response.status_code == 201 or response.status_code == 200:
                 success_log(f'Successfully claimed quest {quest_id} for account {account_number}: {wallet_address}')
                 return True
 
-            error_log(f'Quest claim failed for account {account_number}: {wallet_address}!')
+            elif response.status_code == 429:
+                info_log(f'Rate limit on quest claim for account {account_number}, retrying...')
+                return "429"
+
+            elif response.status_code == 401:
+                account_data = self.account_storage.get_account_data(wallet_address)
+                if account_data:
+                    auth_data = self.login(account_data["private_key"], wallet_address, account_number)
+                    if auth_data:
+                        new_token = self.get_token(auth_data, wallet_address, account_number)
+                        if new_token:
+                            return self.quest_claim(new_token, wallet_address, account_number, quest_id)
+
+            error_log(f'Quest claim failed for account {account_number}: {response.status_code}')
             return False
 
         except Exception as e:
@@ -483,10 +488,10 @@ Resources:
         try:
             headers = {
                 'Accept': 'application/json, text/plain, */*',
+                'Authorization': f'Bearer {token}',
+                'Origin': self.base_url,
                 'Referer': f'{self.base_url}/',
-                'User-Agent': self.user_agent,
-                'sec-ch-ua-platform': '"Windows"',
-                'sec-ch-ua-mobile': '?0'
+                'User-Agent': self.user_agent
             }
 
             response = self.session.get(
@@ -497,21 +502,37 @@ Resources:
 
             if response.status_code == 200:
                 data = response.json()
+                player_data = data.get('players_by_pk', {})
+                
+                result_file = self.config['app']['result_file']
+                existing_addresses = set()
+                if os.path.exists(result_file):
+                    with open(result_file, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            addr = line.split(':')[0]
+                            existing_addresses.add(addr)
+                
+                gold_value = player_data.get('gold', '0')
                 
                 result_line = (
                     f"{wallet_address}:"
-                    f"stars={data.get('stars', 0)}:"
-                    f"gold={data.get('gold', '0')}:"
-                    f"portfolio_value={data.get('portfolio_value', 0)}:"
-                    f"number_of_cards={data.get('number_of_cards', '0')}:"
-                    f"fantasy_points={data.get('fantasy_points', 0)}"
+                    f"stars={player_data.get('stars', 0)}:"
+                    f'gold="{gold_value}":'
+                    f"portfolio_value={player_data.get('portfolio_value', 'None')}:"
+                    f"number_of_cards={player_data.get('number_of_cards', '0')}:"
+                    f"fantasy_points={player_data.get('fantasy_points', 0)}"
                 )
 
-                with open(self.config['app']['result_file'], 'a', encoding='utf-8') as f:
-                    f.write(result_line + '\n')
+                if wallet_address not in existing_addresses:
+                    with open(result_file, 'a', encoding='utf-8') as f:
+                        f.write(result_line + '\n')
 
                 success_log(f"Info collected for account {account_number}: {wallet_address}")
                 return True
+
+            elif response.status_code == 429:
+                info_log(f'Rate limit on info check for account {account_number}, retrying...')
+                return "429"
 
             error_log(f'Error getting info for account {account_number}: {response.status_code}')
             return False
