@@ -162,13 +162,3 @@ Telegram: [@unluck_1l0ck](https://t.me/unluck_1l0ck)
 
 ## Disclaimer
 This tool is for educational purposes only.
-
----
-
-# requirements.txt
-web3==6.11.1
-requests==2.31.0
-colorama==0.4.6
-PyJWT==2.8.0
-python-dateutil==2.8.2
-pytz==2023.3
