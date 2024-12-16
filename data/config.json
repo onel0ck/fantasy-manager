@@ -1,7 +1,7 @@
 {
     "app": {
-        "threads": 1,
-        "keys_file": "data/6.txt",
+        "threads": 10,
+        "keys_file": "data/keys_and_addresses.txt",
         "proxy_file": "data/proxys.txt",
         "success_file": "logs/success_accounts.txt",
         "failure_file": "logs/failure_accounts.txt",
@@ -15,11 +15,11 @@
         "url": "https://blastl2-mainnet.public.blastapi.io"
     },
     "tactic": {
-        "enabled": true,
+        "enabled": false,
         "id": "29d389d3-5b76-4d4e-9d2d-86c7d0f681d5",
         "max_toggle_attempts": 15,
         "delay_between_attempts": 2,
-        "old_account": true,
+        "old_account": false,
         "decks": [
             [7, 6, 5, 3, 2],
             [7, 6, 5, 3, 2],
@@ -44,7 +44,7 @@
         "enabled": false
     },
     "fragments": {
-        "enabled": false,
+        "enabled": true,
         "id": "69e67d0a-0a08-4085-889f-58df15bdecb8"
     },
     "info_check": false
