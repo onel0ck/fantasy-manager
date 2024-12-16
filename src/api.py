@@ -223,7 +223,7 @@ class FantasyAPI:
                         info_log(f'Switching proxy for account {account_number} to: {proxy}')
                         sleep(retry_delay)
                         continue
-                    error_log(f'Authentication failed for account {account_number}: {auth_response.status_code}')
+                    info_log(f'Authentication failed for account {account_number}: {auth_response.status_code}')
                     return False
 
                 auth_data = auth_response.json()
@@ -357,8 +357,14 @@ class FantasyAPI:
                     )
                     daily_streak = data.get("dailyQuestStreak", "N/A")
                     current_day = data.get("dailyQuestProgress", "N/A")
-                    prize = data.get("selectedPrize", {}).get("id", "No prize selected")
-                    success_log(f'№{account_number}:{wallet_address}: {Fore.GREEN}RECORD:{daily_streak}{Fore.LIGHTBLACK_EX}, {Fore.GREEN}CURRENT:{current_day}{Fore.LIGHTBLACK_EX}, {Fore.GREEN}PRIZE:{prize}{Fore.LIGHTBLACK_EX}')
+                    prize = data.get("selectedPrize", {})
+                    prize_type = prize.get("type", "Unknown")
+                    prize_amount = prize.get("text", "Unknown")
+                    
+                    success_log(f'Account {account_number} ({wallet_address}): '
+                              f'{Fore.GREEN}STREAK:{daily_streak}{Fore.RESET}, '
+                              f'{Fore.GREEN}DAY:{current_day}{Fore.RESET}, '
+                              f'{Fore.GREEN}PRIZE:{prize_type}({prize_amount}){Fore.RESET}')
                     return True
                 else:
                     next_due_time = data.get("nextDueTime")
@@ -369,7 +375,7 @@ class FantasyAPI:
                         time_difference = next_due_datetime.replace(tzinfo=pytz.UTC) - current_time.replace(tzinfo=moscow_tz)
                         hours, remainder = divmod(time_difference.seconds, 3600)
                         minutes, _ = divmod(remainder, 60)
-                        success_log(f"{account_number}: {wallet_address}: Next claim: {hours}h {minutes}m")
+                        success_log(f"Account {account_number}: {wallet_address}: Next claim available in {hours}h {minutes}m")
                     return True
 
             error_log(f'Daily claim failed for account {account_number}: {response.status_code}')
@@ -503,6 +509,7 @@ Resources:
             if response.status_code == 200:
                 data = response.json()
                 player_data = data.get('players_by_pk', {})
+                rewards_status = "true" if data.get('rewards', []) else "false"
                 
                 result_file = self.config['app']['result_file']
                 existing_addresses = set()
@@ -520,7 +527,8 @@ Resources:
                     f'gold="{gold_value}":'
                     f"portfolio_value={player_data.get('portfolio_value', 'None')}:"
                     f"number_of_cards={player_data.get('number_of_cards', '0')}:"
-                    f"fantasy_points={player_data.get('fantasy_points', 0)}"
+                    f"fantasy_points={player_data.get('fantasy_points', 0)}:"
+                    f"rewards={rewards_status}"
                 )
 
                 if wallet_address not in existing_addresses:
@@ -529,7 +537,7 @@ Resources:
 
                 success_log(f"Info collected for account {account_number}: {wallet_address}")
                 return True
-
+                
             elif response.status_code == 429:
                 info_log(f'Rate limit on info check for account {account_number}, retrying...')
                 return "429"
@@ -540,7 +548,7 @@ Resources:
         except Exception as e:
             error_log(f"Error in info function for account {account_number}: {str(e)}")
             return False
-
+            
     def get_headers(self, token=None):
         headers = {
             'Accept': 'application/json',
