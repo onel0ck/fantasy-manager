@@ -217,16 +217,16 @@ class FantasyProcessor:
 
                     tasks_completed = True
 
-                    if self.config['quest']['enabled']:
-                        for quest_id in self.config['quest']['ids']:
-                            quest_success = api.quest_claim(token, wallet_address, account_number, quest_id)
-                            if not quest_success:
-                                if "429" in str(quest_success):
-                                    info_log(f'Rate limit on quest claim for account {account_number}, retrying...')
-                                    sleep(2)
-                                    continue
-                                tasks_completed = False
-                                break
+                    if self.config['daily']['enabled']:
+                        daily_success = api.daily_claim(token, wallet_address, account_number)
+                        if not daily_success:
+                            if "429" in str(daily_success):
+                                info_log(f'Rate limit on daily claim for account {account_number}, retrying...')
+                                sleep(2)
+                                continue
+                            tasks_completed = False
+                        else:
+                            success_log(f"Account {account_number}: Successfully claimed daily reward")
 
                     if self.config['info_check']:
                         info_success = api.info(token, wallet_address, account_number)
@@ -237,11 +237,11 @@ class FantasyProcessor:
                                 sleep(2)
                                 continue
                             tasks_completed = False
-
+                    
                     if tasks_completed:
                         self._write_success(private_key, wallet_address)
+                        success_log(f"Account {account_number}: {wallet_address} - All tasks completed successfully")
                         self.retry_manager.add_success_account(account_data)
-                        session.close()
                         return True
                     else:
                         current_attempt += 1
