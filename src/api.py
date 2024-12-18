@@ -321,69 +321,79 @@ class FantasyAPI:
             return False
 
     def daily_claim(self, token, wallet_address, account_number):
-        try:
-            headers = {
-                'Accept': 'application/json, text/plain, */*',
-                'Authorization': f'Bearer {token}',
-                'Origin': self.base_url,
-                'Referer': f'{self.base_url}/',
-                'Content-Length': '0'
-            }
+        max_retries = 5
+        retry_delay = 1
+        
+        headers = {
+            'Accept': 'application/json, text/plain, */*',
+            'Authorization': f'Bearer {token}',
+            'Origin': self.base_url,
+            'Referer': f'{self.base_url}/',
+            'Content-Length': '0'
+        }
 
-            response = self.session.post(
-                f'{self.api_url}/quest/daily-claim',
-                headers=headers,
-                data="",
-                proxies=self.proxies,
-                timeout=10
-            )
+        while True:
+            try:
+                response = self.session.post(
+                    f'{self.api_url}/quest/daily-claim',
+                    headers=headers,
+                    data="",
+                    proxies=self.proxies,
+                    timeout=10
+                )
 
-            if response.status_code == 401:
-                account_data = self.account_storage.get_account_data(wallet_address)
-                if account_data:
-                    auth_data = self.login(account_data["private_key"], wallet_address, account_number)
-                    if auth_data:
-                        new_token = self.get_token(auth_data, wallet_address, account_number)
-                        if new_token:
-                            return self.daily_claim(new_token, wallet_address, account_number)
+                if response.status_code == 500:
+                    info_log(f'Daily claim returned 500 for account {account_number}, retrying same request...')
+                    sleep(retry_delay)
+                    continue
 
-            if response.status_code == 201:
-                data = response.json()
-                if data.get("success", False):
-                    self.account_storage.update_account(
-                        wallet_address,
-                        self.account_storage.get_account_data(wallet_address)["private_key"],
-                        last_daily_claim=datetime.now(pytz.UTC).isoformat()
-                    )
-                    daily_streak = data.get("dailyQuestStreak", "N/A")
-                    current_day = data.get("dailyQuestProgress", "N/A")
-                    prize = data.get("selectedPrize", {})
-                    prize_type = prize.get("type", "Unknown")
-                    prize_amount = prize.get("text", "Unknown")
-                    
-                    success_log(f'Account {account_number} ({wallet_address}): '
-                              f'{Fore.GREEN}STREAK:{daily_streak}{Fore.RESET}, '
-                              f'{Fore.GREEN}DAY:{current_day}{Fore.RESET}, '
-                              f'{Fore.GREEN}PRIZE:{prize_type}({prize_amount}){Fore.RESET}')
-                    return True
-                else:
-                    next_due_time = data.get("nextDueTime")
-                    if next_due_time:
-                        next_due_datetime = parser.parse(next_due_time)
-                        moscow_tz = pytz.timezone('Europe/Moscow')
-                        current_time = datetime.now(moscow_tz)
-                        time_difference = next_due_datetime.replace(tzinfo=pytz.UTC) - current_time.replace(tzinfo=moscow_tz)
-                        hours, remainder = divmod(time_difference.seconds, 3600)
-                        minutes, _ = divmod(remainder, 60)
-                        success_log(f"Account {account_number}: {wallet_address}: Next claim available in {hours}h {minutes}m")
-                    return True
+                if response.status_code == 201:
+                    data = response.json()
+                    if data.get("success", False):
+                        self.account_storage.update_account(
+                            wallet_address,
+                            self.account_storage.get_account_data(wallet_address)["private_key"],
+                            last_daily_claim=datetime.now(pytz.UTC).isoformat()
+                        )
+                        daily_streak = data.get("dailyQuestStreak", "N/A")
+                        current_day = data.get("dailyQuestProgress", "N/A")
+                        prize = data.get("selectedPrize", {})
+                        prize_type = prize.get("type", "Unknown")
+                        prize_amount = prize.get("text", "Unknown")
+                        
+                        success_log(f'Account {account_number} ({wallet_address}): '
+                                  f'{Fore.GREEN}STREAK:{daily_streak}{Fore.RESET}, '
+                                  f'{Fore.GREEN}DAY:{current_day}{Fore.RESET}, '
+                                  f'{Fore.GREEN}PRIZE:{prize_type}({prize_amount}){Fore.RESET}')
+                        return True
+                    else:
+                        next_due_time = data.get("nextDueTime")
+                        if next_due_time:
+                            next_due_datetime = parser.parse(next_due_time)
+                            moscow_tz = pytz.timezone('Europe/Moscow')
+                            current_time = datetime.now(moscow_tz)
+                            time_difference = next_due_datetime.replace(tzinfo=pytz.UTC) - current_time.replace(tzinfo=moscow_tz)
+                            hours, remainder = divmod(time_difference.seconds, 3600)
+                            minutes, _ = divmod(remainder, 60)
+                            success_log(f"Account {account_number}: {wallet_address}: Next claim available in {hours}h {minutes}m")
+                        return True
 
-            error_log(f'Daily claim failed for account {account_number}: {response.status_code}')
-            return False
+                if response.status_code == 401:
+                    account_data = self.account_storage.get_account_data(wallet_address)
+                    if account_data:
+                        auth_data = self.login(account_data["private_key"], wallet_address, account_number)
+                        if auth_data:
+                            new_token = self.get_token(auth_data, wallet_address, account_number)
+                            if new_token:
+                                return self.daily_claim(new_token, wallet_address, account_number)
+                    return False
 
-        except Exception as e:
-            error_log(f'Daily claim error for account {account_number}: {str(e)}')
-            return False
+                error_log(f'Daily claim failed for account {account_number}: {response.status_code}')
+                return False
+
+            except Exception as e:
+                error_log(f'Daily claim error for account {account_number}: {str(e)}')
+                return False
 
     def _create_sign_message(self, wallet_address, nonce):
         return f"""fantasy.top wants you to sign in with your Ethereum account:
