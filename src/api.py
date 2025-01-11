@@ -14,6 +14,7 @@ import jwt
 from typing import Dict, Optional, Tuple
 from colorama import Fore
 from .utils import error_log, success_log, info_log, rate_limit_log
+from capmonster_python import TurnstileTask
 
 class TokenManager:
     def __init__(self, account_storage, api_instance):
@@ -160,6 +161,58 @@ class FantasyAPI:
         self.token_manager = TokenManager(account_storage, self)
         
     
+    def _get_captcha_token(self, account_number: int) -> str:
+        if self.config['capmonster']['enabled']:
+            capmonster = TurnstileTask(self.config['capmonster']['api_key'])
+            task_id = capmonster.create_task(
+                website_url="https://fantasy.top",
+                website_key="0x4AAAAAAAM8ceq5KhP1uJBt"
+            )
+            result = capmonster.join_task_result(task_id)
+            return result['token']
+        
+        create_task_url = "https://api.anti-captcha.com/createTask"
+        get_result_url = "https://api.anti-captcha.com/getTaskResult"
+        
+        create_task_payload = {
+            "clientKey": self.config['anticaptcha']['api_key'],
+            "task": {
+                "type": "TurnstileTaskProxyless",
+                "websiteURL": "https://fantasy.top",
+                "websiteKey": "0x4AAAAAAAM8ceq5KhP1uJBt"
+            }
+        }
+
+        response = requests.post(create_task_url, json=create_task_payload)
+        task_data = response.json()
+        
+        if task_data.get('errorId') > 0:
+            raise Exception(f"Error creating task: {task_data.get('errorDescription')}")
+            
+        task_id = task_data.get('taskId')
+        
+        max_attempts = 30
+        delay = 2
+        
+        for _ in range(max_attempts):
+            result_payload = {
+                "clientKey": self.config['anticaptcha']['api_key'],
+                "taskId": task_id
+            }
+            
+            response = requests.post(get_result_url, json=result_payload)
+            result_data = response.json()
+            
+            if result_data.get('errorId') > 0:
+                raise Exception(f"Error getting result: {result_data.get('errorDescription')}")
+                
+            if result_data.get('status') == 'ready':
+                return result_data.get('solution', {}).get('token')
+                
+            sleep(delay)
+            
+        raise Exception("Timeout waiting for anticaptcha result")
+
     def login(self, private_key, wallet_address, account_number):
         max_retries = 15
         retry_delay = 2
@@ -176,113 +229,119 @@ class FantasyAPI:
                     'Privy-App-Id': 'clra3wyj700lslb0frokrj261',
                     'Privy-Client': 'react-auth:1.92.8',
                     'Privy-Client-Id': 'client-WY2gt82Pt8inAqcq7bpeCwm6Y42kx96jX6hVeVwF8K1qQ',
-                    'Privy-Ca-Id': '315a64ce-afe9-4e58-87ea-3abd2d9a9484'
+                    'Privy-Ca-Id': '315a64ce-afe9-4e58-87ea-3abd2d9a9484',
+                    'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                    'Sec-Ch-Ua-Mobile': '?0',
+                    'Sec-Ch-Ua-Platform': '"Windows"',
+                    'Sec-Fetch-Dest': 'empty',
+                    'Sec-Fetch-Mode': 'cors',
+                    'Sec-Fetch-Site': 'same-site',
+                    'Priority': 'u=1, i'
                 })
 
-                init_payload = {'address': wallet_address}
-                
-                init_response = self.session.post(
-                    'https://privy.fantasy.top/api/v1/siwe/init', 
-                    json=init_payload,
-                    proxies=self.proxies
-                )
+                try:
+                    turnstile_token = self._get_captcha_token(account_number)
 
-                if init_response.status_code != 200:
+                    init_payload = {
+                        'address': wallet_address,
+                        'turnstileToken': turnstile_token
+                    }
+                    
+                    init_response = self.session.post(
+                        'https://privy.fantasy.top/api/v1/siwe/init', 
+                        json=init_payload,
+                        headers=self.session.headers,
+                        proxies=self.proxies,
+                        timeout=10
+                    )
+                    
+                    if init_response.status_code != 200:
+                        if attempt < max_retries - 1:
+                            sleep(retry_delay)
+                            continue
+                        return False
+
+                    nonce_data = init_response.json()
+                    message = self._create_sign_message(wallet_address, nonce_data['nonce'])
+                    signed_message = self._sign_message(message, private_key)
+
+                    auth_payload = {
+                        'chainId': 'eip155:81457',
+                        'connectorType': 'injected',
+                        'message': message,
+                        'signature': signed_message.signature.hex(),
+                        'walletClientType': 'metamask',
+                        'mode': 'login-or-sign-up'
+                    }
+
+                    auth_response = self.session.post(
+                        'https://privy.fantasy.top/api/v1/siwe/authenticate',
+                        json=auth_payload,
+                        proxies=self.proxies,
+                        timeout=10
+                    )
+                    
+                    if auth_response.status_code != 200:
+                        if attempt < max_retries - 1:
+                            proxy = random.choice(self.all_proxies)
+                            self.proxies = {"http": proxy, "https": proxy}
+                            sleep(retry_delay)
+                            continue
+                        return False
+
+                    auth_data = auth_response.json()
+                    if 'token' in auth_data:
+                        self.session.cookies.set('privy-token', auth_data['token'])
+                    if auth_data.get('identity_token'):
+                        self.session.cookies.set('privy-id-token', auth_data['identity_token'])
+                    
+                    final_auth_payload = {"address": wallet_address}
+                    
+                    final_auth_response = self.session.post(
+                        f'{self.base_url}/api/auth/privy',
+                        json=final_auth_payload,
+                        headers={
+                            'Accept': 'application/json, text/plain, */*',
+                            'Content-Type': 'application/json',
+                            'Origin': self.base_url,
+                            'Referer': f'{self.base_url}/onboarding/home'
+                        },
+                        proxies=self.proxies,
+                        timeout=10
+                    )
+                    
+                    if final_auth_response.status_code != 200:
+                        if attempt < max_retries - 1:
+                            proxy = random.choice(self.all_proxies)
+                            self.proxies = {"http": proxy, "https": proxy}
+                            sleep(retry_delay)
+                            continue
+                        return False
+
+                    final_auth_data = final_auth_response.json()
+                    cookies_dict = {cookie.name: cookie.value for cookie in self.session.cookies}
+
+                    self.account_storage.update_account(
+                        wallet_address,
+                        private_key,
+                        token=final_auth_data.get('token'),
+                        cookies=cookies_dict
+                    )
+                    
+                    return final_auth_data
+
+                except Exception as e:
                     if attempt < max_retries - 1:
-                        proxy = random.choice(self.all_proxies)
-                        self.proxies = {"http": proxy, "https": proxy}
-                        info_log(f'Switching proxy for account {account_number} to: {proxy}')
                         sleep(retry_delay)
                         continue
-                    info_log(f'SIWE init failed for account {account_number}: Status {init_response.status_code}')
-                    return False
-
-                nonce_data = init_response.json()
-                message = self._create_sign_message(wallet_address, nonce_data['nonce'])
-                signed_message = self._sign_message(message, private_key)
-
-                auth_payload = {
-                    'chainId': 'eip155:81457',
-                    'connectorType': 'injected',
-                    'message': message,
-                    'signature': signed_message.signature.hex(),
-                    'walletClientType': 'metamask',
-                    'mode': 'login-or-sign-up'
-                }
-
-                auth_response = self.session.post(
-                    'https://privy.fantasy.top/api/v1/siwe/authenticate',
-                    json=auth_payload,
-                    proxies=self.proxies
-                )
-
-                if auth_response.status_code != 200:
-                    if attempt < max_retries - 1:
-                        proxy = random.choice(self.all_proxies)
-                        self.proxies = {"http": proxy, "https": proxy}
-                        info_log(f'Switching proxy for account {account_number} to: {proxy}')
-                        sleep(retry_delay)
-                        continue
-                    info_log(f'Authentication failed for account {account_number}: {auth_response.status_code}')
-                    return False
-
-                auth_data = auth_response.json()
-                
-                if 'token' in auth_data:
-                    self.session.cookies.set('privy-token', auth_data['token'])
-                if auth_data.get('identity_token'):
-                    self.session.cookies.set('privy-id-token', auth_data['identity_token'])
-                
-                final_auth_headers = {
-                    'Accept': 'application/json, text/plain, */*',
-                    'Content-Type': 'application/json',
-                    'Origin': self.base_url,
-                    'Referer': f'{self.base_url}/onboarding/home'
-                }
-                
-                final_auth_payload = {"address": wallet_address}
-                
-                final_auth_response = self.session.post(
-                    f'{self.base_url}/api/auth/privy',
-                    json=final_auth_payload,
-                    headers=final_auth_headers,
-                    proxies=self.proxies
-                )
-                
-                if final_auth_response.status_code != 200:
-                    if attempt < max_retries - 1:
-                        proxy = random.choice(self.all_proxies)
-                        self.proxies = {"http": proxy, "https": proxy}
-                        info_log(f'Switching proxy for account {account_number} to: {proxy}')
-                        sleep(retry_delay)
-                        continue
-                    error_log(f'Final auth failed for account {account_number}: {final_auth_response.status_code}')
-                    return False
-
-                final_auth_data = final_auth_response.json()
-                cookies_dict = {cookie.name: cookie.value for cookie in self.session.cookies}
-
-                self.account_storage.update_account(
-                    wallet_address,
-                    private_key,
-                    token=final_auth_data.get('token'),
-                    cookies=cookies_dict
-                )
-                
-                info_log(f'Authentication successful for account {account_number}: {wallet_address}')
-                return final_auth_data
 
             except Exception as e:
-                info_log(f'Login error for account {account_number}: {str(e)}')
                 if attempt < max_retries - 1:
-                    proxy = random.choice(self.all_proxies)
-                    self.proxies = {"http": proxy, "https": proxy}
-                    info_log(f'Switching proxy for account {account_number} to: {proxy}')
                     sleep(retry_delay)
                     continue
 
         return False
-        
+
     def get_token(self, auth_data, wallet_address, account_number):
         try:
             headers = {
