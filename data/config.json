@@ -33,6 +33,14 @@
             [6, 5, 5, 3, 3]
         ]
     },
+    "capmonster": {
+        "enabled": true,
+        "api_key": "your-capmonster-key"
+    },
+    "anticaptcha": {
+        "enabled": false,
+        "api_key": "your-anticaptcha-key"
+    },
     "quest": {
         "enabled": false,
         "ids": [
@@ -41,10 +49,10 @@
         ]
     },
     "daily": {
-        "enabled": false
+        "enabled": true
     },
     "fragments": {
-        "enabled": true,
+        "enabled": false,
         "id": "69e67d0a-0a08-4085-889f-58df15bdecb8"
     },
     "info_check": false
