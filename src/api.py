@@ -328,6 +328,7 @@ class FantasyAPI:
                         cookies=cookies_dict
                     )
                     
+                    info_log(f"Account {account_number}: {wallet_address} Login done")
                     return final_auth_data
 
                 except Exception as e:
