@@ -244,7 +244,7 @@ class FantasyAPI:
 
                     init_payload = {
                         'address': wallet_address,
-                        'turnstileToken': turnstile_token
+                        'token': turnstile_token
                     }
                     
                     init_response = self.session.post(
