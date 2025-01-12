@@ -15,6 +15,10 @@ from typing import Dict, Optional, Tuple
 from colorama import Fore
 from .utils import error_log, success_log, info_log, rate_limit_log
 from capmonster_python import TurnstileTask
+import queue
+import threading
+import time
+
 
 class TokenManager:
     def __init__(self, account_storage, api_instance):
@@ -147,6 +151,40 @@ class TokenManager:
                 cookies=None
             )
 
+class CaptchaTokenPool:
+    def __init__(self, size=10):
+        self.tokens = queue.Queue(maxsize=size)
+        self.lock = threading.Lock()
+        self.valid_until = {}
+        
+    def add_token(self, token: str):
+        try:
+            expiry = datetime.now() + timedelta(minutes=2)
+            self.tokens.put((token, expiry), block=False)
+            with self.lock:
+                self.valid_until[token] = expiry
+        except queue.Full:
+            pass
+
+    def get_token(self) -> Optional[str]:
+        try:
+            while not self.tokens.empty():
+                token, expiry = self.tokens.get()
+                if datetime.now() < expiry:
+                    return token
+                with self.lock:
+                    self.valid_until.pop(token, None)
+        except queue.Empty:
+            pass
+        return None
+
+    def remove_expired(self):
+        with self.lock:
+            current_time = datetime.now()
+            expired = [token for token, expiry in self.valid_until.items() if current_time >= expiry]
+            for token in expired:
+                self.valid_until.pop(token)
+
 class FantasyAPI:
     def __init__(self, web3_provider, session, proxies, all_proxies, config, user_agent, account_storage):
         self.web3 = Web3(Web3.HTTPProvider(web3_provider))
@@ -159,59 +197,83 @@ class FantasyAPI:
         self.api_url = "https://api-v2.fantasy.top"
         self.account_storage = account_storage
         self.token_manager = TokenManager(account_storage, self)
+        self.captcha_pool = CaptchaTokenPool(size=20)
+        self._start_token_refresher()
         
     
-    def _get_captcha_token(self, account_number: int) -> str:
-        if self.config['capmonster']['enabled']:
-            capmonster = TurnstileTask(self.config['capmonster']['api_key'])
-            task_id = capmonster.create_task(
-                website_url="https://fantasy.top",
-                website_key="0x4AAAAAAAM8ceq5KhP1uJBt"
-            )
-            result = capmonster.join_task_result(task_id)
-            return result['token']
-        
-        create_task_url = "https://api.anti-captcha.com/createTask"
-        get_result_url = "https://api.anti-captcha.com/getTaskResult"
-        
-        create_task_payload = {
-            "clientKey": self.config['anticaptcha']['api_key'],
-            "task": {
-                "type": "TurnstileTaskProxyless",
-                "websiteURL": "https://fantasy.top",
-                "websiteKey": "0x4AAAAAAAM8ceq5KhP1uJBt"
-            }
-        }
+    def _start_token_refresher(self):
+        def refresh_tokens():
+            while True:
+                try:
+                    if self.captcha_pool.tokens.qsize() < 10:
+                        token = self._get_new_captcha_token()
+                        if token:
+                            self.captcha_pool.add_token(token)
+                    self.captcha_pool.remove_expired()
+                    time.sleep(1)
+                except Exception as e:
+                    logging.error(f"Error in token refresher: {e}")
+                    time.sleep(1)
 
-        response = requests.post(create_task_url, json=create_task_payload)
-        task_data = response.json()
-        
-        if task_data.get('errorId') > 0:
-            raise Exception(f"Error creating task: {task_data.get('errorDescription')}")
-            
-        task_id = task_data.get('taskId')
-        
-        max_attempts = 30
-        delay = 2
-        
-        for _ in range(max_attempts):
-            result_payload = {
-                "clientKey": self.config['anticaptcha']['api_key'],
-                "taskId": task_id
-            }
-            
-            response = requests.post(get_result_url, json=result_payload)
-            result_data = response.json()
-            
-            if result_data.get('errorId') > 0:
-                raise Exception(f"Error getting result: {result_data.get('errorDescription')}")
+        thread = threading.Thread(target=refresh_tokens, daemon=True)
+        thread.start()
+
+    def _get_new_captcha_token(self) -> Optional[str]:
+        try:
+            if self.config['capmonster']['enabled']:
+                capmonster = TurnstileTask(self.config['capmonster']['api_key'])
+                task_id = capmonster.create_task(
+                    website_url="https://fantasy.top",
+                    website_key="0x4AAAAAAAM8ceq5KhP1uJBt"
+                )
+                result = capmonster.join_task_result(task_id)
+                return result.get('token')
+            elif self.config['anticaptcha']['enabled']:
+                create_task_url = "https://api.anti-captcha.com/createTask"
+                get_result_url = "https://api.anti-captcha.com/getTaskResult"
                 
-            if result_data.get('status') == 'ready':
-                return result_data.get('solution', {}).get('token')
+                create_task_payload = {
+                    "clientKey": self.config['anticaptcha']['api_key'],
+                    "task": {
+                        "type": "TurnstileTaskProxyless",
+                        "websiteURL": "https://fantasy.top",
+                        "websiteKey": "0x4AAAAAAAM8ceq5KhP1uJBt"
+                    }
+                }
+
+                response = requests.post(create_task_url, json=create_task_payload)
+                task_data = response.json()
                 
-            sleep(delay)
-            
-        raise Exception("Timeout waiting for anticaptcha result")
+                if task_data.get('errorId') > 0:
+                    return None
+                    
+                task_id = task_data.get('taskId')
+                
+                for _ in range(30):
+                    result_payload = {
+                        "clientKey": self.config['anticaptcha']['api_key'],
+                        "taskId": task_id
+                    }
+                    
+                    response = requests.post(get_result_url, json=result_payload)
+                    result_data = response.json()
+                    
+                    if result_data.get('status') == 'ready':
+                        return result_data.get('solution', {}).get('token')
+                        
+                    time.sleep(2)
+                    
+        except Exception as e:
+            logging.error(f"Error getting new captcha token: {e}")
+        return None
+
+    def _get_captcha_token(self) -> Optional[str]:
+        # Try to get existing token from pool first
+        token = self.captcha_pool.get_token()
+        if token:
+            return token
+        # If no token available, get new one
+        return self._get_new_captcha_token()
 
     def login(self, private_key, wallet_address, account_number):
         max_retries = 15
@@ -240,7 +302,7 @@ class FantasyAPI:
                 })
 
                 try:
-                    turnstile_token = self._get_captcha_token(account_number)
+                    turnstile_token = self._get_captcha_token()
 
                     init_payload = {
                         'address': wallet_address,
