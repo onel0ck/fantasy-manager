@@ -1,5 +1,4 @@
 import json
-import logging
 from time import sleep
 import random
 import requests
@@ -15,7 +14,6 @@ from typing import Dict, Optional, Tuple
 from colorama import Fore
 from .utils import error_log, success_log, info_log, rate_limit_log
 from capmonster_python import TurnstileTask
-import queue
 import threading
 import time
 
@@ -152,38 +150,41 @@ class TokenManager:
             )
 
 class CaptchaTokenPool:
-    def __init__(self, size=10):
-        self.tokens = queue.Queue(maxsize=size)
+    def __init__(self, config):
+        self.config = config
+        self.current_token = None
+        self.last_update = 0
+        self.update_interval = 7
         self.lock = threading.Lock()
-        self.valid_until = {}
-        
-    def add_token(self, token: str):
-        try:
-            expiry = datetime.now() + timedelta(minutes=2)
-            self.tokens.put((token, expiry), block=False)
-            with self.lock:
-                self.valid_until[token] = expiry
-        except queue.Full:
-            pass
 
-    def get_token(self) -> Optional[str]:
+    def _get_new_token(self) -> Optional[str]:
         try:
-            while not self.tokens.empty():
-                token, expiry = self.tokens.get()
-                if datetime.now() < expiry:
+            if self.config['capmonster']['enabled']:
+                capmonster = TurnstileTask(self.config['capmonster']['api_key'])
+                task_id = capmonster.create_task(
+                    website_url="https://fantasy.top",
+                    website_key="0x4AAAAAAAM8ceq5KhP1uJBt"
+                )
+                result = capmonster.join_task_result(task_id)
+                token = result.get('token')
+                if token:
                     return token
-                with self.lock:
-                    self.valid_until.pop(token, None)
-        except queue.Empty:
-            pass
+        except Exception as e:
+            error_log(f"Error getting captcha token: {e}")
         return None
 
-    def remove_expired(self):
+    def get_token(self) -> Optional[str]:
         with self.lock:
-            current_time = datetime.now()
-            expired = [token for token, expiry in self.valid_until.items() if current_time >= expiry]
-            for token in expired:
-                self.valid_until.pop(token)
+            current_time = time.time()
+            
+            if self.current_token and current_time - self.last_update < self.update_interval:
+                return self.current_token
+
+            new_token = self._get_new_token()
+            if new_token:
+                self.current_token = new_token
+                self.last_update = current_time
+            return new_token
 
 class FantasyAPI:
     def __init__(self, web3_provider, session, proxies, all_proxies, config, user_agent, account_storage):
@@ -197,213 +198,138 @@ class FantasyAPI:
         self.api_url = "https://api-v2.fantasy.top"
         self.account_storage = account_storage
         self.token_manager = TokenManager(account_storage, self)
-        self.captcha_pool = CaptchaTokenPool(size=20)
-        self._start_token_refresher()
-        
-    
-    def _start_token_refresher(self):
-        def refresh_tokens():
-            while True:
-                try:
-                    if self.captcha_pool.tokens.qsize() < 10:
-                        token = self._get_new_captcha_token()
-                        if token:
-                            self.captcha_pool.add_token(token)
-                    self.captcha_pool.remove_expired()
-                    time.sleep(1)
-                except Exception as e:
-                    logging.error(f"Error in token refresher: {e}")
-                    time.sleep(1)
-
-        thread = threading.Thread(target=refresh_tokens, daemon=True)
-        thread.start()
-
-    def _get_new_captcha_token(self) -> Optional[str]:
-        try:
-            if self.config['capmonster']['enabled']:
-                capmonster = TurnstileTask(self.config['capmonster']['api_key'])
-                task_id = capmonster.create_task(
-                    website_url="https://fantasy.top",
-                    website_key="0x4AAAAAAAM8ceq5KhP1uJBt"
-                )
-                result = capmonster.join_task_result(task_id)
-                return result.get('token')
-            elif self.config['anticaptcha']['enabled']:
-                create_task_url = "https://api.anti-captcha.com/createTask"
-                get_result_url = "https://api.anti-captcha.com/getTaskResult"
-                
-                create_task_payload = {
-                    "clientKey": self.config['anticaptcha']['api_key'],
-                    "task": {
-                        "type": "TurnstileTaskProxyless",
-                        "websiteURL": "https://fantasy.top",
-                        "websiteKey": "0x4AAAAAAAM8ceq5KhP1uJBt"
-                    }
-                }
-
-                response = requests.post(create_task_url, json=create_task_payload)
-                task_data = response.json()
-                
-                if task_data.get('errorId') > 0:
-                    return None
-                    
-                task_id = task_data.get('taskId')
-                
-                for _ in range(30):
-                    result_payload = {
-                        "clientKey": self.config['anticaptcha']['api_key'],
-                        "taskId": task_id
-                    }
-                    
-                    response = requests.post(get_result_url, json=result_payload)
-                    result_data = response.json()
-                    
-                    if result_data.get('status') == 'ready':
-                        return result_data.get('solution', {}).get('token')
-                        
-                    time.sleep(2)
-                    
-        except Exception as e:
-            logging.error(f"Error getting new captcha token: {e}")
-        return None
+        self.captcha_pool = CaptchaTokenPool(config)
 
     def _get_captcha_token(self) -> Optional[str]:
-        # Try to get existing token from pool first
-        token = self.captcha_pool.get_token()
-        if token:
-            return token
-        # If no token available, get new one
-        return self._get_new_captcha_token()
+        return self.captcha_pool.get_token()
 
     def login(self, private_key, wallet_address, account_number):
-        max_retries = 15
-        retry_delay = 2
-        
-        for attempt in range(max_retries):
-            try:
-                self.session.headers.update({
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json',
-                    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-                    'Origin': self.base_url,
-                    'Referer': f'{self.base_url}/',
-                    'User-Agent': self.user_agent,
-                    'Privy-App-Id': 'clra3wyj700lslb0frokrj261',
-                    'Privy-Client': 'react-auth:1.92.8',
-                    'Privy-Client-Id': 'client-WY2gt82Pt8inAqcq7bpeCwm6Y42kx96jX6hVeVwF8K1qQ',
-                    'Privy-Ca-Id': '315a64ce-afe9-4e58-87ea-3abd2d9a9484',
-                    'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-                    'Sec-Ch-Ua-Mobile': '?0',
-                    'Sec-Ch-Ua-Platform': '"Windows"',
-                    'Sec-Fetch-Dest': 'empty',
-                    'Sec-Fetch-Mode': 'cors',
-                    'Sec-Fetch-Site': 'same-site',
-                    'Priority': 'u=1, i'
-                })
+       max_retries = 15
+       retry_delay = 2
+       captcha_token = None
+       
+       for attempt in range(max_retries):
+           try:
+               self.session.headers.update({
+                   'Accept': 'application/json',
+                   'Content-Type': 'application/json',
+                   'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                   'Origin': self.base_url,
+                   'Referer': f'{self.base_url}/',
+                   'User-Agent': self.user_agent,
+                   'Privy-App-Id': 'clra3wyj700lslb0frokrj261',
+                   'Privy-Client': 'react-auth:1.92.8',
+                   'Privy-Client-Id': 'client-WY2gt82Pt8inAqcq7bpeCwm6Y42kx96jX6hVeVwF8K1qQ',
+                   'Privy-Ca-Id': '315a64ce-afe9-4e58-87ea-3abd2d9a9484',
+                   'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                   'Sec-Ch-Ua-Mobile': '?0',
+                   'Sec-Ch-Ua-Platform': '"Windows"',
+                   'Sec-Fetch-Dest': 'empty',
+                   'Sec-Fetch-Mode': 'cors',
+                   'Sec-Fetch-Site': 'same-site',
+                   'Priority': 'u=1, i'
+               })
 
-                try:
-                    turnstile_token = self._get_captcha_token()
+               if captcha_token is None:
+                   captcha_token = self._get_captcha_token()
+                   if not captcha_token:
+                       error_log(f'Failed to get captcha token for account {account_number}')
+                       sleep(retry_delay)
+                       continue
 
-                    init_payload = {
-                        'address': wallet_address,
-                        'token': turnstile_token
-                    }
-                    
-                    init_response = self.session.post(
-                        'https://privy.fantasy.top/api/v1/siwe/init', 
-                        json=init_payload,
-                        headers=self.session.headers,
-                        proxies=self.proxies,
-                        timeout=10
-                    )
-                    
-                    if init_response.status_code != 200:
-                        if attempt < max_retries - 1:
-                            sleep(retry_delay)
-                            continue
-                        return False
+               init_response = self.session.post(
+                   'https://privy.fantasy.top/api/v1/siwe/init', 
+                   json={'address': wallet_address, 'token': captcha_token},
+                   headers=self.session.headers,
+                   proxies=self.proxies,
+                   timeout=10
+               )
+               
+               if init_response.status_code == 429:
+                   sleep(retry_delay)
+                   continue
+                   
+               if init_response.status_code != 200:
+                   captcha_token = self._get_captcha_token()
+                   continue
 
-                    nonce_data = init_response.json()
-                    message = self._create_sign_message(wallet_address, nonce_data['nonce'])
-                    signed_message = self._sign_message(message, private_key)
+               nonce_data = init_response.json()
+               message = self._create_sign_message(wallet_address, nonce_data['nonce'])
+               signed_message = self._sign_message(message, private_key)
 
-                    auth_payload = {
-                        'chainId': 'eip155:81457',
-                        'connectorType': 'injected',
-                        'message': message,
-                        'signature': signed_message.signature.hex(),
-                        'walletClientType': 'metamask',
-                        'mode': 'login-or-sign-up'
-                    }
+               auth_payload = {
+                   'chainId': 'eip155:81457',
+                   'connectorType': 'injected',
+                   'message': message,
+                   'signature': signed_message.signature.hex(),
+                   'walletClientType': 'metamask',
+                   'mode': 'login-or-sign-up'
+               }
 
-                    auth_response = self.session.post(
-                        'https://privy.fantasy.top/api/v1/siwe/authenticate',
-                        json=auth_payload,
-                        proxies=self.proxies,
-                        timeout=10
-                    )
-                    
-                    if auth_response.status_code != 200:
-                        if attempt < max_retries - 1:
-                            proxy = random.choice(self.all_proxies)
-                            self.proxies = {"http": proxy, "https": proxy}
-                            sleep(retry_delay)
-                            continue
-                        return False
+               auth_response = self.session.post(
+                   'https://privy.fantasy.top/api/v1/siwe/authenticate',
+                   json=auth_payload,
+                   proxies=self.proxies,
+                   timeout=10
+               )
+               
+               if auth_response.status_code != 200:
+                   if attempt < max_retries - 1:
+                       proxy = random.choice(self.all_proxies)
+                       self.proxies = {"http": proxy, "https": proxy}
+                       sleep(retry_delay)
+                       continue
+                   return False
 
-                    auth_data = auth_response.json()
-                    if 'token' in auth_data:
-                        self.session.cookies.set('privy-token', auth_data['token'])
-                    if auth_data.get('identity_token'):
-                        self.session.cookies.set('privy-id-token', auth_data['identity_token'])
-                    
-                    final_auth_payload = {"address": wallet_address}
-                    
-                    final_auth_response = self.session.post(
-                        f'{self.base_url}/api/auth/privy',
-                        json=final_auth_payload,
-                        headers={
-                            'Accept': 'application/json, text/plain, */*',
-                            'Content-Type': 'application/json',
-                            'Origin': self.base_url,
-                            'Referer': f'{self.base_url}/onboarding/home'
-                        },
-                        proxies=self.proxies,
-                        timeout=10
-                    )
-                    
-                    if final_auth_response.status_code != 200:
-                        if attempt < max_retries - 1:
-                            proxy = random.choice(self.all_proxies)
-                            self.proxies = {"http": proxy, "https": proxy}
-                            sleep(retry_delay)
-                            continue
-                        return False
+               auth_data = auth_response.json()
+               if 'token' in auth_data:
+                   self.session.cookies.set('privy-token', auth_data['token'])
+               if auth_data.get('identity_token'):
+                   self.session.cookies.set('privy-id-token', auth_data['identity_token'])
+               
+               final_auth_payload = {"address": wallet_address}
+               
+               final_auth_response = self.session.post(
+                   f'{self.base_url}/api/auth/privy',
+                   json=final_auth_payload,
+                   headers={
+                       'Accept': 'application/json, text/plain, */*',
+                       'Content-Type': 'application/json',
+                       'Origin': self.base_url,
+                       'Referer': f'{self.base_url}/onboarding/home'
+                   },
+                   proxies=self.proxies,
+                   timeout=10
+               )
+               
+               if final_auth_response.status_code != 200:
+                   if attempt < max_retries - 1:
+                       proxy = random.choice(self.all_proxies)
+                       self.proxies = {"http": proxy, "https": proxy}
+                       sleep(retry_delay)
+                       continue
+                   return False
 
-                    final_auth_data = final_auth_response.json()
-                    cookies_dict = {cookie.name: cookie.value for cookie in self.session.cookies}
+               final_auth_data = final_auth_response.json()
+               cookies_dict = {cookie.name: cookie.value for cookie in self.session.cookies}
 
-                    self.account_storage.update_account(
-                        wallet_address,
-                        private_key,
-                        token=final_auth_data.get('token'),
-                        cookies=cookies_dict
-                    )
-                    
-                    info_log(f"Account {account_number}: {wallet_address} Login done")
-                    return final_auth_data
+               self.account_storage.update_account(
+                   wallet_address,
+                   private_key,
+                   token=final_auth_data.get('token'),
+                   cookies=cookies_dict
+               )
+               
+               info_log(f"Account {account_number}: {wallet_address} Login done")
+               return final_auth_data
 
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        sleep(retry_delay)
-                        continue
+           except Exception as e:
+               error_log(f'Error during login attempt {attempt + 1}: {str(e)}')
+               if attempt < max_retries - 1:
+                   sleep(retry_delay)
+                   continue
 
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    sleep(retry_delay)
-                    continue
-
-        return False
+       return False
 
     def get_token(self, auth_data, wallet_address, account_number):
         try:
