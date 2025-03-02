@@ -12,7 +12,7 @@ import os
 import jwt
 from typing import Dict, Optional, Tuple
 from colorama import Fore
-from .utils import error_log, success_log, info_log, rate_limit_log
+from .utils import error_log, success_log, info_log, rate_limit_log, debug_log
 from capmonster_python import TurnstileTask
 import threading
 import time
@@ -162,17 +162,35 @@ class CaptchaTokenPool:
             if self.config['capmonster']['enabled']:
                 capmonster = TurnstileTask(self.config['capmonster']['api_key'])
                 task_id = capmonster.create_task(
-                    website_url="https://fantasy.top",
+                    website_url="https://monad.fantasy.top",
                     website_key="0x4AAAAAAAM8ceq5KhP1uJBt"
                 )
                 result = capmonster.join_task_result(task_id)
                 token = result.get('token')
                 if token:
                     return token
+            elif self.config.get('2captcha', {}).get('enabled', False):
+                api_key = self.config['2captcha']['api_key']
+                solver = requests.get(
+                    f"https://2captcha.com/in.php?key={api_key}&method=turnstile&sitekey=0x4AAAAAAAM8ceq5KhP1uJBt&pageurl=https://monad.fantasy.top"
+                )
+                if solver.text.startswith('OK|'):
+                    captcha_id = solver.text.split('|')[1]
+                    for i in range(30):
+                        time.sleep(5)
+                        response = requests.get(
+                            f"https://2captcha.com/res.php?key={api_key}&action=get&id={captcha_id}"
+                        )
+                        if response.text.startswith('OK|'):
+                            return response.text.split('|')[1]
+                        if response.text != 'CAPCHA_NOT_READY':
+                            error_log(f"Error from 2captcha: {response.text}")
+                            break
+                    error_log("Timeout waiting for 2captcha solution")
         except Exception as e:
             error_log(f"Error getting captcha token: {e}")
         return None
-
+        
     def get_token(self) -> Optional[str]:
         with self.lock:
             current_time = time.time()
@@ -194,174 +212,175 @@ class FantasyAPI:
         self.all_proxies = all_proxies
         self.config = config
         self.user_agent = user_agent
-        self.base_url = "https://fantasy.top"
-        self.api_url = "https://api-v2.fantasy.top"
+        self.base_url = "https://monad.fantasy.top"
+        self.privy_url = "https://auth.privy.io"
         self.account_storage = account_storage
         self.token_manager = TokenManager(account_storage, self)
         self.captcha_pool = CaptchaTokenPool(config)
+        
+        info_log(f"[DEBUG] FantasyAPI initialized with base_url: {self.base_url}, privy_url: {self.privy_url}")
 
     def _get_captcha_token(self) -> Optional[str]:
         return self.captcha_pool.get_token()
 
     def login(self, private_key, wallet_address, account_number):
-       max_retries = 15
-       retry_delay = 2
-       captcha_token = None
-       
-       for attempt in range(max_retries):
-           try:
-               self.session.headers.update({
-                   'Accept': 'application/json',
-                   'Content-Type': 'application/json',
-                   'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-                   'Origin': self.base_url,
-                   'Referer': f'{self.base_url}/',
-                   'User-Agent': self.user_agent,
-                   'Privy-App-Id': 'clra3wyj700lslb0frokrj261',
-                   'Privy-Client': 'react-auth:1.92.8',
-                   'Privy-Client-Id': 'client-WY2gt82Pt8inAqcq7bpeCwm6Y42kx96jX6hVeVwF8K1qQ',
-                   'Privy-Ca-Id': '315a64ce-afe9-4e58-87ea-3abd2d9a9484',
-                   'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-                   'Sec-Ch-Ua-Mobile': '?0',
-                   'Sec-Ch-Ua-Platform': '"Windows"',
-                   'Sec-Fetch-Dest': 'empty',
-                   'Sec-Fetch-Mode': 'cors',
-                   'Sec-Fetch-Site': 'same-site',
-                   'Priority': 'u=1, i'
-               })
+        max_retries = 3
+        retry_delay = 2
+        captcha_token = None
+        
+        info_log(f"Starting login process for account {account_number}: {wallet_address}")
+        
+        for attempt in range(max_retries):
+            try:
+                self.session.headers.update({
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Origin': 'https://monad.fantasy.top',
+                    'Referer': f'https://monad.fantasy.top/',
+                    'User-Agent': self.user_agent,
+                    'privy-app-id': 'cm6ezzy660297zgdk7t3glcz5',
+                    'privy-client': 'react-auth:1.92.3',
+                    'privy-client-id': 'client-WY5gEtuoV4UpG2Le3n5pt6QQD61Ztx62VDwtDCZeQc3sN',
+                    'privy-ca-id': self.config['app'].get('privy_ca_id', '52bc773e-737a-4e32-bd36-7563dcef2de1'),
+                    'Sec-Ch-Ua': '"Google Chrome";v="132", "Chromium";v="132", "Not_A Brand";v="8"',
+                    'Sec-Ch-Ua-Mobile': '?0',
+                    'Sec-Ch-Ua-Platform': '"Windows"',
+                    'Sec-Fetch-Dest': 'empty',
+                    'Sec-Fetch-Mode': 'cors',
+                    'Sec-Fetch-Site': 'cross-site',
+                    'Priority': 'u=1, i'
+                })
 
-               if captcha_token is None:
-                   captcha_token = self._get_captcha_token()
-                   if not captcha_token:
-                       error_log(f'Failed to get captcha token for account {account_number}')
-                       sleep(retry_delay)
-                       continue
+                if captcha_token is None:
+                    captcha_token = self._get_captcha_token()
+                    if not captcha_token:
+                        error_log(f'Failed to get captcha token for account {account_number}')
+                        sleep(retry_delay)
+                        continue
 
-               init_response = self.session.post(
-                   'https://privy.fantasy.top/api/v1/siwe/init', 
-                   json={'address': wallet_address, 'token': captcha_token},
-                   headers=self.session.headers,
-                   proxies=self.proxies,
-                   timeout=10
-               )
-               
-               if init_response.status_code == 429:
-                   sleep(retry_delay)
-                   continue
-                   
-               if init_response.status_code != 200:
-                   captcha_token = self._get_captcha_token()
-                   continue
+                debug_log(f"Requesting nonce for account {account_number}")
+                init_response = self.session.post(
+                    'https://auth.privy.io/api/v1/siwe/init', 
+                    json={'address': wallet_address, 'token': captcha_token},
+                    headers=self.session.headers,
+                    proxies=self.proxies,
+                    timeout=10
+                )
+                
+                if init_response.status_code == 429:
+                    info_log(f"Rate limit hit during nonce request for account {account_number}")
+                    sleep(retry_delay)
+                    continue
+                    
+                if init_response.status_code != 200:
+                    info_log(f"Failed to get nonce, status: {init_response.status_code}")
+                    captcha_token = self._get_captcha_token()
+                    continue
 
-               nonce_data = init_response.json()
-               message = self._create_sign_message(wallet_address, nonce_data['nonce'])
-               signed_message = self._sign_message(message, private_key)
+                nonce_data = init_response.json()
+                message = self._create_sign_message(wallet_address, nonce_data['nonce'])
+                debug_log(f"Created sign message for account {account_number}")
+                signed_message = self._sign_message(message, private_key)
+                debug_log(f"Message signed successfully for account {account_number}")
 
-               auth_payload = {
-                   'chainId': 'eip155:81457',
-                   'connectorType': 'injected',
-                   'message': message,
-                   'signature': signed_message.signature.hex(),
-                   'walletClientType': 'metamask',
-                   'mode': 'login-or-sign-up'
-               }
+                auth_payload = {
+                    'chainId': 'eip155:1',
+                    'connectorType': 'injected',
+                    'message': message,
+                    'signature': signed_message.signature.hex(),
+                    'walletClientType': 'metamask',
+                    'mode': 'login-or-sign-up'
+                }
 
-               auth_response = self.session.post(
-                   'https://privy.fantasy.top/api/v1/siwe/authenticate',
-                   json=auth_payload,
-                   proxies=self.proxies,
-                   timeout=10
-               )
-               
-               if auth_response.status_code != 200:
-                   if attempt < max_retries - 1:
-                       proxy = random.choice(self.all_proxies)
-                       self.proxies = {"http": proxy, "https": proxy}
-                       sleep(retry_delay)
-                       continue
-                   return False
+                debug_log(f"Sending authentication request for account {account_number}")
+                auth_response = self.session.post(
+                    'https://auth.privy.io/api/v1/siwe/authenticate',
+                    json=auth_payload,
+                    proxies=self.proxies,
+                    timeout=10
+                )
+                
+                if auth_response.status_code != 200:
+                    error_log(f"Auth failed with status {auth_response.status_code} for account {account_number}")
+                    if attempt < max_retries - 1:
+                        proxy = random.choice(self.all_proxies)
+                        self.proxies = {"http": proxy, "https": proxy}
+                        info_log(f"Switching proxy for account {account_number}")
+                        sleep(retry_delay)
+                        continue
+                    return False
 
-               auth_data = auth_response.json()
-               if 'token' in auth_data:
-                   self.session.cookies.set('privy-token', auth_data['token'])
-               if auth_data.get('identity_token'):
-                   self.session.cookies.set('privy-id-token', auth_data['identity_token'])
-               
-               final_auth_payload = {"address": wallet_address}
-               
-               final_auth_response = self.session.post(
-                   f'{self.base_url}/api/auth/privy',
-                   json=final_auth_payload,
-                   headers={
-                       'Accept': 'application/json, text/plain, */*',
-                       'Content-Type': 'application/json',
-                       'Origin': self.base_url,
-                       'Referer': f'{self.base_url}/onboarding/home'
-                   },
-                   proxies=self.proxies,
-                   timeout=10
-               )
-               
-               if final_auth_response.status_code != 200:
-                   if attempt < max_retries - 1:
-                       proxy = random.choice(self.all_proxies)
-                       self.proxies = {"http": proxy, "https": proxy}
-                       sleep(retry_delay)
-                       continue
-                   return False
+                auth_data = auth_response.json()
+                debug_log(f"Authentication successful, received token for account {account_number}")
+                
+                if 'token' in auth_data:
+                    self.session.cookies.set('privy-token', auth_data['token'])
+                    debug_log(f"Set privy-token cookie for account {account_number}")
+                if auth_data.get('identity_token'):
+                    self.session.cookies.set('privy-id-token', auth_data['identity_token'])
+                    debug_log(f"Set privy-id-token cookie for account {account_number}")
+                
+                final_auth_payload = {"address": wallet_address}
+                
+                debug_log(f"Requesting application token for account {account_number}")
+                final_auth_response = self.session.post(
+                    'https://monad.fantasy.top/api/auth/privy',
+                    json=final_auth_payload,
+                    headers={
+                        'Accept': 'application/json, text/plain, */*',
+                        'Content-Type': 'application/json',
+                        'Origin': 'https://monad.fantasy.top',
+                        'Referer': 'https://monad.fantasy.top/',
+                        'Authorization': f'Bearer {auth_data["token"]}'
+                    },
+                    proxies=self.proxies,
+                    timeout=10
+                )
+                
+                if final_auth_response.status_code != 200:
+                    error_log(f"Failed to get application token, status: {final_auth_response.status_code}")
+                    if attempt < max_retries - 1:
+                        proxy = random.choice(self.all_proxies)
+                        self.proxies = {"http": proxy, "https": proxy}
+                        sleep(retry_delay)
+                        continue
+                    return False
 
-               final_auth_data = final_auth_response.json()
-               cookies_dict = {cookie.name: cookie.value for cookie in self.session.cookies}
+                final_auth_data = final_auth_response.json()
+                cookies_dict = {cookie.name: cookie.value for cookie in self.session.cookies}
 
-               self.account_storage.update_account(
-                   wallet_address,
-                   private_key,
-                   token=final_auth_data.get('token'),
-                   cookies=cookies_dict
-               )
-               
-               info_log(f"Account {account_number}: {wallet_address} Login done")
-               return final_auth_data
+                self.account_storage.update_account(
+                    wallet_address,
+                    private_key,
+                    token=final_auth_data.get('token'),
+                    cookies=cookies_dict
+                )
+                
+                success_log(f"Account {account_number}: {wallet_address} Login done")
+                return final_auth_data
 
-           except Exception as e:
-               error_log(f'Error during login attempt {attempt + 1}: {str(e)}')
-               if attempt < max_retries - 1:
-                   sleep(retry_delay)
-                   continue
+            except Exception as e:
+                error_log(f'Error during login attempt {attempt + 1}: {str(e)}')
+                if attempt < max_retries - 1:
+                    sleep(retry_delay)
+                    continue
 
-       return False
+        return False
 
     def get_token(self, auth_data, wallet_address, account_number):
         try:
-            headers = {
-                'Accept': 'application/json, text/plain, */*',
-                'Content-Type': 'application/json',
-                'Origin': self.base_url,
-                'Referer': f'{self.base_url}/onboarding/home'
-            }
-
-            payload = {"address": wallet_address}
-
-            response = self.session.post(
-                f'{self.base_url}/api/auth/privy',
-                json=payload,
-                headers=headers,
-                proxies=self.proxies,
-                timeout=10
-            )
-
-            if response.status_code == 200:
-                token = response.json().get('token')
-                if token:
-                    self.account_storage.update_account(
-                        wallet_address,
-                        self.account_storage.get_account_data(wallet_address)["private_key"],
-                        token=token
-                    )
+            if "token" in auth_data:
+                token = auth_data["token"]
+                self.account_storage.update_account(
+                    wallet_address,
+                    self.account_storage.get_account_data(wallet_address)["private_key"],
+                    token=token
+                )
                 info_log(f'Token obtained for account {account_number}: {wallet_address}')
                 return token
             
-            error_log(f'Token request failed for account {account_number}: {response.status_code}')
+            error_log(f'No token found in auth_data for account {account_number}')
             return False
 
         except Exception as e:
@@ -369,31 +388,56 @@ class FantasyAPI:
             return False
 
     def daily_claim(self, token, wallet_address, account_number):
-        max_retries = 5
+        max_retries = 2
         retry_delay = 1
+        
+        privy_id_token = None
+        for cookie in self.session.cookies:
+            if cookie.name == 'privy-id-token':
+                privy_id_token = cookie.value
+                break
+        
+        auth_token = privy_id_token if privy_id_token else token
         
         headers = {
             'Accept': 'application/json, text/plain, */*',
-            'Authorization': f'Bearer {token}',
-            'Origin': self.base_url,
-            'Referer': f'{self.base_url}/',
-            'Content-Length': '0'
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Authorization': f'Bearer {auth_token}',
+            'Origin': 'https://monad.fantasy.top',
+            'Referer': 'https://monad.fantasy.top/',
+            'Content-Length': '0',
+            'User-Agent': self.user_agent,
+            'Priority': 'u=1, i',
+            'Sec-Ch-Ua': '"Not A(Brand";v="8", "Chromium";v="132", "Google Chrome";v="132"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-site'
         }
 
         while True:
             try:
                 response = self.session.post(
-                    f'{self.api_url}/quest/daily-claim',
+                    'https://secret-api.fantasy.top/quest/daily-claim',
                     headers=headers,
                     data="",
                     proxies=self.proxies,
                     timeout=10
                 )
-
+                
                 if response.status_code == 500:
-                    info_log(f'Daily claim returned 500 for account {account_number}, retrying same request...')
+                    info_log(f'Daily claim returned 500 for account {account_number}, retrying...')
                     sleep(retry_delay)
                     continue
+                    
+                if response.status_code == 405:
+                    response = self.session.get(
+                        'https://secret-api.fantasy.top/quest/daily-claim',
+                        headers=headers,
+                        proxies=self.proxies,
+                        timeout=10
+                    )
 
                 if response.status_code == 201:
                     data = response.json()
@@ -427,6 +471,20 @@ class FantasyAPI:
                         return True
 
                 if response.status_code == 401:
+                    if auth_token == privy_id_token and token:
+                        auth_token = token
+                        headers['Authorization'] = f'Bearer {auth_token}'
+                        response = self.session.post(
+                            'https://secret-api.fantasy.top/quest/daily-claim',
+                            headers=headers,
+                            data="",
+                            proxies=self.proxies,
+                            timeout=10
+                        )
+                        
+                        if response.status_code == 201:
+                            return True
+                            
                     account_data = self.account_storage.get_account_data(wallet_address)
                     if account_data:
                         auth_data = self.login(account_data["private_key"], wallet_address, account_number)
@@ -443,19 +501,86 @@ class FantasyAPI:
                 error_log(f'Daily claim error for account {account_number}: {str(e)}')
                 return False
 
+    def onboarding_quest_claim(self, token, wallet_address, account_number, quest_id):
+        try:
+            privy_id_token = None
+            for cookie in self.session.cookies:
+                if cookie.name == 'privy-id-token':
+                    privy_id_token = cookie.value
+                    break
+                    
+            auth_token = privy_id_token if privy_id_token else token
+            
+            headers = {
+                'Accept': 'application/json, text/plain, */*',
+                'Authorization': f'Bearer {auth_token}',
+                'Origin': 'https://monad.fantasy.top',
+                'Referer': 'https://monad.fantasy.top/',
+                'Content-Length': '0',
+                'User-Agent': self.user_agent,
+                'Priority': 'u=1, i',
+                'Sec-Ch-Ua': '"Not A(Brand";v="8", "Chromium";v="132", "Google Chrome";v="132"',
+                'Sec-Ch-Ua-Mobile': '?0',
+                'Sec-Ch-Ua-Platform': '"Windows"',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-site'
+            }
+
+            response = self.session.post(
+                f'https://secret-api.fantasy.top/quest/onboarding/complete/{quest_id}',
+                headers=headers,
+                data="",
+                proxies=self.proxies,
+                timeout=10
+            )
+
+            if response.status_code == 401 and auth_token == privy_id_token and token:
+                auth_token = token
+                headers['Authorization'] = f'Bearer {auth_token}'
+                response = self.session.post(
+                    f'https://secret-api.fantasy.top/quest/onboarding/complete/{quest_id}',
+                    headers=headers,
+                    data="",
+                    proxies=self.proxies,
+                    timeout=10
+                )
+                
+            if response.status_code == 401:
+                account_data = self.account_storage.get_account_data(wallet_address)
+                if account_data:
+                    auth_data = self.login(account_data["private_key"], wallet_address, account_number)
+                    if auth_data:
+                        new_token = self.get_token(auth_data, wallet_address, account_number)
+                        if new_token:
+                            return self.onboarding_quest_claim(new_token, wallet_address, account_number, quest_id)
+
+            if response.status_code == 201:
+                return True
+
+            error_log(f'Onboarding quest claim failed for account {account_number}: {response.status_code}')
+            return False
+
+        except Exception as e:
+            error_log(f'Onboarding quest claim error for account {account_number}: {str(e)}')
+            return False
+
     def _create_sign_message(self, wallet_address, nonce):
-        return f"""fantasy.top wants you to sign in with your Ethereum account:
-{wallet_address}
-
-By signing, you are proving you own this wallet and logging in. This does not initiate a transaction or cost any fees.
-
-URI: https://fantasy.top
-Version: 1
-Chain ID: 81457
-Nonce: {nonce}
-Issued At: {datetime.utcnow().isoformat()}Z
-Resources:
-- https://privy.io"""
+        lines = []
+        lines.append(f"monad.fantasy.top wants you to sign in with your Ethereum account:")
+        lines.append(f"{wallet_address}")
+        lines.append("")
+        lines.append(f"By signing, you are proving you own this wallet and logging in. This does not initiate a transaction or cost any fees.")
+        lines.append("")
+        lines.append(f"URI: https://monad.fantasy.top")
+        lines.append(f"Version: 1")
+        lines.append(f"Chain ID: 1")
+        lines.append(f"Nonce: {nonce}")
+        lines.append(f"Issued At: {datetime.utcnow().isoformat()}Z")
+        lines.append(f"Resources:")
+        lines.append(f"- https://privy.io")
+        
+        return "\n".join(lines)
 
     def _sign_message(self, message, private_key):
         return self.web3.eth.account.sign_message(
@@ -469,8 +594,8 @@ Resources:
                 'Accept': 'application/json, text/plain, */*',
                 'Authorization': f'Bearer {token}',
                 'Content-Type': 'application/json',
-                'Origin': self.base_url,
-                'Referer': f'{self.base_url}/',
+                'Origin': 'https://monad.fantasy.top',
+                'Referer': 'https://monad.fantasy.top/',
                 'User-Agent': self.user_agent
             }
 
@@ -480,7 +605,7 @@ Resources:
             }
 
             response = self.session.post(
-                f'{self.api_url}/quest/claim',
+                f'{self.base_url}/quest/claim',
                 json=payload,
                 headers=headers,
                 proxies=self.proxies
@@ -515,13 +640,13 @@ Resources:
             headers = {
                 'Accept': 'application/json, text/plain, */*',
                 'Authorization': f'Bearer {token}',
-                'Origin': self.base_url,
-                'Referer': f'{self.base_url}/',
+                'Origin': 'https://monad.fantasy.top',
+                'Referer': 'https://monad.fantasy.top/',
                 'Content-Length': '0'
             }
 
             response = self.session.post(
-                f'{self.api_url}/quest/onboarding/complete/{fragment_id}',
+                f'{self.base_url}/quest/onboarding/complete/{fragment_id}',
                 headers=headers,
                 data="",
                 proxies=self.proxies,
@@ -550,55 +675,127 @@ Resources:
 
     def info(self, token, wallet_address, account_number):
         try:
+            privy_id_token = None
+            for cookie in self.session.cookies:
+                if cookie.name == 'privy-id-token':
+                    privy_id_token = cookie.value
+                    break
+            
+            auth_token = privy_id_token if privy_id_token else token
+            
             headers = {
                 'Accept': 'application/json, text/plain, */*',
-                'Authorization': f'Bearer {token}',
-                'Origin': self.base_url,
-                'Referer': f'{self.base_url}/',
-                'User-Agent': self.user_agent
+                'Authorization': f'Bearer {auth_token}',
+                'Origin': 'https://monad.fantasy.top',
+                'Referer': 'https://monad.fantasy.top/',
+                'User-Agent': self.user_agent,
+                'sec-ch-ua': '"Not A(Brand";v="8", "Chromium";v="132", "Google Chrome";v="132"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"'
             }
 
+            url = f'https://secret-api.fantasy.top/player/basic-data/{wallet_address}'
+            
             response = self.session.get(
-                f'{self.api_url}/player/basic-data/{wallet_address}',
+                url,
                 headers=headers,
-                proxies=self.proxies
+                proxies=self.proxies,
+                timeout=10
             )
 
             if response.status_code == 200:
                 data = response.json()
+                
+                if 'players_by_pk' not in data:
+                    error_log(f"Unexpected response structure for account {account_number}: missing 'players_by_pk'")
+                    return False
+                    
                 player_data = data.get('players_by_pk', {})
-                rewards_status = "true" if data.get('rewards', []) else "false"
+                rewards_status = len(data.get('rewards', []))
+                
+                fantasy_points = player_data.get('fantasy_points', 0)
+                fragments = player_data.get('fragments', 0)
+                is_onboarding_done = bool(player_data.get('is_onboarding_done', False))
+                portfolio_value = str(player_data.get('portfolio_value', '0'))
+                whitelist_tickets = int(player_data.get('whitelist_tickets', 0))
+                number_of_cards = int(player_data.get('number_of_cards', 0))
+                
+                try:
+                    total_gliding_score = float(player_data.get('total_gliding_score', 0))
+                except (ValueError, TypeError):
+                    total_gliding_score = 0.0
+                    
+                gold_value = str(player_data.get('gold', '0'))
                 
                 result_file = self.config['app']['result_file']
-                existing_addresses = set()
+                existing_data = {}
+                
                 if os.path.exists(result_file):
                     with open(result_file, 'r', encoding='utf-8') as f:
                         for line in f:
-                            addr = line.split(':')[0]
-                            existing_addresses.add(addr)
-                
-                gold_value = player_data.get('gold', '0')
+                            parts = line.strip().split(':')
+                            if len(parts) > 0:
+                                addr = parts[0]
+                                existing_data[addr] = line.strip()
                 
                 result_line = (
                     f"{wallet_address}:"
                     f"stars={player_data.get('stars', 0)}:"
                     f'gold="{gold_value}":'
-                    f"portfolio_value={player_data.get('portfolio_value', 'None')}:"
-                    f"number_of_cards={player_data.get('number_of_cards', '0')}:"
-                    f"fantasy_points={player_data.get('fantasy_points', 0)}:"
+                    f"portfolio_value={portfolio_value}:"
+                    f"number_of_cards={number_of_cards}:"
+                    f"fantasy_points={fantasy_points}:"
+                    f"fragments={fragments}:"
+                    f"onboarding_done={is_onboarding_done}:"
+                    f"whitelist_tickets={whitelist_tickets}:"
+                    f"gliding_score={total_gliding_score:.2f}:"
                     f"rewards={rewards_status}"
                 )
 
-                if wallet_address not in existing_addresses:
-                    with open(result_file, 'a', encoding='utf-8') as f:
-                        f.write(result_line + '\n')
-
-                success_log(f"Info collected for account {account_number}: {wallet_address}")
-                return True
+                os.makedirs("logs", exist_ok=True)
                 
+                with open(result_file, 'a+', encoding='utf-8') as f:
+                    if wallet_address not in existing_data:
+                        f.write(result_line + '\n')
+                    else:
+                        os.makedirs(os.path.dirname("logs/updated_results.txt"), exist_ok=True)
+                        update_file = "logs/updated_results.txt"
+                        with open(update_file, 'a+', encoding='utf-8') as update_f:
+                            update_f.write(result_line + '\n')
+
+                success_log(
+                    f"Info collected for account {account_number}: {wallet_address} | "
+                    f"fMON:{fantasy_points}, Cards:{number_of_cards}, "
+                    f"Portfolio:{portfolio_value}, Onboarding:{is_onboarding_done}"
+                )
+                return True
+                    
             elif response.status_code == 429:
                 info_log(f'Rate limit on info check for account {account_number}, retrying...')
                 return "429"
+            elif response.status_code == 401:
+                if auth_token == privy_id_token and token:
+                    auth_token = token
+                    headers['Authorization'] = f'Bearer {auth_token}'
+                    retry_response = self.session.get(
+                        url,
+                        headers=headers,
+                        proxies=self.proxies,
+                        timeout=10
+                    )
+                    
+                    if retry_response.status_code == 200:
+                        return self.info(token, wallet_address, account_number)
+                
+                account_data = self.account_storage.get_account_data(wallet_address)
+                if account_data:
+                    auth_data = self.login(account_data["private_key"], wallet_address, account_number)
+                    if isinstance(auth_data, str) and "429" in auth_data:
+                        return "429"
+                    if auth_data:
+                        new_token = self.get_token(auth_data, wallet_address, account_number)
+                        if new_token:
+                            return self.info(new_token, wallet_address, account_number)
 
             error_log(f'Error getting info for account {account_number}: {response.status_code}')
             return False
@@ -648,7 +845,7 @@ Resources:
             try:
                 info_log(f'Toggle attempt {attempt + 1}/{max_attempts} for account {account_number}')
                 response = self.session.post(
-                    'https://api-v2.fantasy.top/tactics/toggle-can-play-free-tactics', 
+                    f'{self.base_url}/tactics/toggle-can-play-free-tactics',
                     headers=headers, 
                     proxies=self.proxies
                 )
@@ -801,13 +998,13 @@ Resources:
                 'Accept': 'application/json, text/plain, */*',
                 'Content-Type': 'application/json',
                 'Authorization': f'Bearer {token}',
-                'Origin': self.base_url,
-                'Referer': f'{self.base_url}/play/tactics'
+                'Origin': 'https://monad.fantasy.top',
+                'Referer': 'https://monad.fantasy.top/play/tactics'
             }
 
             register_payload = {"tactic_id": self.config['tactic']['id']}
             register_response = self.session.post(
-                f'{self.api_url}/tactics/register',
+                f'{self.base_url}/tactics/register',
                 json=register_payload,
                 headers=headers,
                 proxies=self.proxies,
@@ -826,7 +1023,7 @@ Resources:
 
                         entry_id = response_data["id"]
                         deck_response = self.session.get(
-                            f'{self.api_url}/tactics/entry/{entry_id}/choices',
+                            f'{self.base_url}/tactics/entry/{entry_id}/choices',
                             headers=self.get_headers(token),
                             proxies=self.proxies
                         )
@@ -860,7 +1057,7 @@ Resources:
                                     }
 
                                     save_response = self.session.post(
-                                        f'{self.api_url}/tactics/save-deck',
+                                        f'{self.base_url}/tactics/save-deck',
                                         json=save_payload,
                                         headers=headers,
                                         proxies=self.proxies
@@ -905,3 +1102,112 @@ Resources:
                 used_cards.append(card)
                 return card
         return None
+
+    def claim_starter_cards(self, token: str, wallet_address: str, account_number: int) -> bool:
+        try:
+            privy_id_token = None
+            for cookie in self.session.cookies:
+                if cookie.name == 'privy-id-token':
+                    privy_id_token = cookie.value
+                    break
+            
+            auth_token = privy_id_token if privy_id_token else token
+            
+            monad_web3 = Web3(Web3.HTTPProvider(self.config['monad_rpc']['url']))
+            
+            contract_address = "0x9077d31a794d81c21b0650974d5f581f4000cd1a"
+            contract_method_data = "0x1ff7712f00000000000000000000000000000000000000000000000000000000000000140000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000"
+            
+            nonce_response = monad_web3.eth.get_transaction_count(wallet_address, "pending")
+            
+            gas_price = monad_web3.eth.gas_price
+            max_priority_fee = monad_web3.to_wei(1.5, 'gwei')
+            max_fee_per_gas = gas_price * 2
+            
+            transaction = {
+                'nonce': nonce_response,
+                'to': monad_web3.to_checksum_address(contract_address),
+                'value': 0,
+                'gas': 550000,
+                'maxFeePerGas': max_fee_per_gas,
+                'maxPriorityFeePerGas': max_priority_fee,
+                'data': contract_method_data,
+                'type': 2,
+                'chainId': 10143
+            }
+            
+            private_key = self.account_storage.get_account_data(wallet_address)["private_key"]
+            
+            try:
+                account = monad_web3.eth.account.from_key(private_key)
+                signed_txn = account.sign_transaction(transaction)
+                tx_hash = monad_web3.eth.send_raw_transaction(signed_txn.rawTransaction)
+                tx_hash_hex = tx_hash.hex()
+                debug_log(f"Transaction sent: {tx_hash_hex}")
+                
+                receipt = None
+                retries = 10
+                while retries > 0 and receipt is None:
+                    try:
+                        receipt = monad_web3.eth.get_transaction_receipt(tx_hash)
+                    except Exception:
+                        sleep(2)
+                        retries -= 1
+                
+                if receipt and receipt['status'] == 1:
+                    success_log(f"Transaction confirmed for account {account_number}: {tx_hash_hex}")
+                else:
+                    error_log(f"Transaction failed or timed out for account {account_number}")
+                    return False
+            except Exception as e:
+                error_log(f"Error signing or sending transaction for account {account_number}: {str(e)}")
+                return False
+            
+            pack_opening_quest_id = "66387328-ff2a-46a9-acb7-846b466934b6"
+            
+            headers = {
+                'Accept': 'application/json, text/plain, */*',
+                'Authorization': f'Bearer {auth_token}',
+                'Origin': 'https://monad.fantasy.top',
+                'Referer': 'https://monad.fantasy.top/',
+                'Content-Length': '0',
+                'User-Agent': self.user_agent,
+                'Priority': 'u=1, i',
+                'Sec-Ch-Ua': '"Not A(Brand";v="8", "Chromium";v="132", "Google Chrome";v="132"',
+                'Sec-Ch-Ua-Mobile': '?0',
+                'Sec-Ch-Ua-Platform': '"Windows"',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-site'
+            }
+
+            onboarding_response = self.session.post(
+                f'https://secret-api.fantasy.top/quest/onboarding/complete/{pack_opening_quest_id}',
+                headers=headers,
+                data="",
+                proxies=self.proxies,
+                timeout=15
+            )
+            
+            if onboarding_response.status_code == 401 and auth_token == privy_id_token and token:
+                auth_token = token
+                headers['Authorization'] = f'Bearer {auth_token}'
+                
+                onboarding_response = self.session.post(
+                    f'https://secret-api.fantasy.top/quest/onboarding/complete/{pack_opening_quest_id}',
+                    headers=headers,
+                    data="",
+                    proxies=self.proxies,
+                    timeout=15
+                )
+            
+            if onboarding_response.status_code == 201:
+                success_log(f"Successfully claimed starter cards for account {account_number}")
+                return True
+            
+            error_log(f"Failed to complete the pack opening quest: {onboarding_response.status_code}")
+            return False
+            
+        except Exception as e:
+            error_log(f"Error claiming starter cards for account {account_number}: {str(e)}")
+            return False
